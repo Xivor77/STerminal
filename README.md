@@ -34,14 +34,16 @@ Interfaccia: lancia `Show-STerminal.ps1`, o la scorciatoia "STerminal" nel menu 
 ### Mini-interfaccia (`Show-STerminal.ps1`)
 Due colonne:
 - **Aree di lavoro** — la lista delle aree salvate: **Riprendi / Elimina / Aggiorna**.
-- **Tab aperti** — tutto cio' che hai aperto adesso (anche i tab occupati: claude, server...), etichettato `path - attivita del tab [pid]`. Selezioni uno o piu' tab e **Aggiungi a gruppo** (esistente o nuovo).
+- **Tab aperti** — tutto cio' che hai aperto adesso (anche i tab occupati: claude, server...), etichettato `path - attivita del tab [pid]`. Selezioni uno o piu' tab e **Aggiungi a gruppo**: si apre un dialogo dove scegli il nome dell'area e uno di due modi mutuamente esclusivi:
+  - **Automatico** — colori assortiti (distinti) + titoli originali;
+  - **Per singola tab** — imposti titolo e colore di ogni tab a mano (menu coi colori).
 
 ### A comandi
 
 **Aree:**
 - `New-STWorkspace -Name <n> -Tabs @(@{Title;Cwd;Command;Color}...)` — definisce un'area da zero.
 - `Save-STWorkspace -Name <n> [-Group <g>]` — cattura i tab aperti registrati (con `-Group`, solo quelli etichettati).
-- `Add-STWorkspaceTab -Name <n> -Tabs @(...)` — aggiunge tab a un'area (la crea se non c'e').
+- `Add-STWorkspaceTab -Name <n> -Tabs @(...) [-AutoColor]` — aggiunge tab a un'area (la crea se non c'e'); con `-AutoColor` assegna a ogni tab senza colore un colore distinto dalla tavolozza.
 - `Resume-STWorkspace -Name <n>` — riapre l'area: una finestra WT coi suoi tab, pre-colorati, nelle cartelle giuste, ognuno che ristampa il suo storico e poi rilancia il suo comando.
 - `Get-STWorkspace` / `Remove-STWorkspace -Name <n>`.
 
