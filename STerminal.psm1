@@ -120,14 +120,25 @@ function Set-STerminalTab {
     [CmdletBinding()]
     param(
         [string]$Title,
-        [string]$Color   # es. "#00AA55" - applicato alla riapertura via wt --tabColor
+        [string]$Color,   # es. "#00AA55" - applicato alla riapertura via wt --tabColor
+        [string]$Command, # cosa rilanciare alla riapertura (es. "claude --resume <id>")
+        [string]$Group    # etichetta: Save-STWorkspace -Group la usa per catturare solo questi tab
     )
     if (-not $script:STActive) { Write-Warning "STerminal non inizializzato in questo tab (Initialize-STerminal)."; return }
     $meta = Read-STMeta $script:STSlot
     if (-not $meta) { return }
-    if ($PSBoundParameters.ContainsKey('Title')) { $meta.Title = $Title; Set-STTabTitle $Title }
-    if ($PSBoundParameters.ContainsKey('Color')) { $meta.Color = $Color }
+    if ($PSBoundParameters.ContainsKey('Title'))   { $meta.Title = $Title; Set-STTabTitle $Title }
+    if ($PSBoundParameters.ContainsKey('Color'))   { $meta.Color = $Color }
+    if ($PSBoundParameters.ContainsKey('Command')) {
+        if ($meta.PSObject.Properties['Command']) { $meta.Command = $Command }
+        else { $meta | Add-Member -NotePropertyName Command -NotePropertyValue $Command }
+    }
+    if ($PSBoundParameters.ContainsKey('Group')) {
+        if ($meta.PSObject.Properties['Group']) { $meta.Group = $Group }
+        else { $meta | Add-Member -NotePropertyName Group -NotePropertyValue $Group }
+    }
     Write-STMeta $meta
+    if ($PSBoundParameters.ContainsKey('Group')) { Write-Host "STerminal: tab nel gruppo '$Group'." -ForegroundColor DarkCyan }
 }
 
 # Aggiorna cwd + heartbeat nel meta del tab (throttled). Chiamata dal prompt.
@@ -187,6 +198,8 @@ function Initialize-STerminal {
         Slot      = $slot
         Title     = if ($PSBoundParameters.ContainsKey('Title')) { $Title } elseif ($existing) { $existing.Title } else { $null }
         Color     = if ($PSBoundParameters.ContainsKey('Color')) { $Color } elseif ($existing) { $existing.Color } else { $null }
+        Command   = if ($existing -and $existing.PSObject.Properties['Command']) { $existing.Command } else { $null }
+        Group     = if ($existing -and $existing.PSObject.Properties['Group']) { $existing.Group } else { $null }
         Cwd       = (Get-Location).Path
         Shell     = $shellExe
         Pid       = $PID
@@ -299,11 +312,17 @@ function Get-STWorkspace {
 # NON puo' leggere quelli impostati dalla UI di WT (click destro / doppio click).
 function Save-STWorkspace {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Name)
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Group   # se dato: cattura SOLO i tab etichettati con questo gruppo (Set-STerminalTab -Group)
+    )
 
     $slots = Get-STOpenSlots
+    if ($Group) { $slots = @($slots | Where-Object { $_.Group -eq $Group }) }
     if (-not $slots) {
-        Write-Warning "STerminal: nessun tab registrato/aperto. Serve l'auto-init nel profilo (o Initialize-STerminal nei tab)."
+        $hint = if ($Group) { "nessun tab con gruppo '$Group' (etichettali con Set-STerminalTab -Group '$Group')." }
+                else { "nessun tab registrato/aperto. Serve l'auto-init nel profilo (o Initialize-STerminal nei tab)." }
+        Write-Warning "STerminal: $hint"
         return
     }
 
@@ -322,7 +341,7 @@ function Save-STWorkspace {
             Color   = $s.Color
             Cwd     = $s.Cwd
             Shell   = $s.Shell
-            Command = $null            # riservato alla fase "comando per tab"
+            Command = $s.Command
             Storico = $storFile
         })
         $i++
@@ -333,11 +352,39 @@ function Save-STWorkspace {
     Write-Host "STerminal: area '$Name' salvata ($($tabs.Count) tab)." -ForegroundColor Green
 }
 
+# Definisce un'area da ZERO, senza catturare tab aperti: un elenco di tab con un comando.
+# Ogni tab e' una hashtable: @{ Title=...; Cwd=...; Command=...; Color=...; Shell=... }
+# (Title/Cwd/Command sono quelli che contano; Color/Shell opzionali.)
+function New-STWorkspace {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][object[]]$Tabs
+    )
+    $dir = Get-STWorkspaceDir $Name
+    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $list = [System.Collections.Generic.List[object]]::new()
+    foreach ($t in $Tabs) {
+        $list.Add([pscustomobject]@{
+            Title   = $t.Title
+            Color   = $t.Color
+            Cwd     = $t.Cwd
+            Shell   = if ($t.Shell) { $t.Shell } else { 'powershell.exe' }
+            Command = $t.Command
+            Storico = $null
+        })
+    }
+    $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $list }
+    ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath (Join-Path $dir 'workspace.json') -Encoding utf8
+    Write-Host "STerminal: area '$Name' definita ($($list.Count) tab)." -ForegroundColor Green
+}
+
 # Apre un singolo tab di un'area: ristampa lo storico (testo) e poi diventa un tab vivo
 # (re-Initialize), cosi' l'area si puo' ri-salvare.
 function Open-STWorkspaceTab {
     [CmdletBinding()]
-    param([string]$Storico, [string]$Title, [string]$Color)
+    param([string]$Storico, [string]$Title, [string]$Color, [string]$Command)
     if ($Storico -and (Test-Path -LiteralPath $Storico)) {
         $body = Get-Content -LiteralPath $Storico -Raw
         if ($body) {
@@ -351,6 +398,11 @@ function Open-STWorkspaceTab {
         }
     }
     Initialize-STerminal -Title $Title -Color $Color
+    if ($Command) {
+        Set-STerminalTab -Command $Command   # persisti nel nuovo slot (ri-salvabile)
+        Write-Host "STerminal: avvio -> $Command" -ForegroundColor DarkCyan
+        try { Invoke-Expression $Command } catch { Write-Warning "STerminal: comando fallito: $($_.Exception.Message)" }
+    }
 }
 
 # Costruisce gli argomenti wt e il comando base64 per UN tab di un'area, SENZA lanciarlo.
@@ -365,7 +417,7 @@ function Get-STResumeTabSpec {
     $q = { param($s) if ($null -eq $s) { '' } else { ([string]$s).Replace("'", "''") } }
     $stor = if ($Tab.Storico) { Join-Path $WorkspaceDir $Tab.Storico } else { '' }
     $exe  = if ($Tab.Shell) { [string]$Tab.Shell } else { 'powershell.exe' }
-    $cmd  = "Import-Module '$(& $q $script:STModulePath)'; Open-STWorkspaceTab -Storico '$(& $q $stor)' -Title '$(& $q $Tab.Title)' -Color '$(& $q $Tab.Color)'"
+    $cmd  = "Import-Module '$(& $q $script:STModulePath)'; Open-STWorkspaceTab -Storico '$(& $q $stor)' -Title '$(& $q $Tab.Title)' -Color '$(& $q $Tab.Color)' -Command '$(& $q $Tab.Command)'"
     $enc  = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
 
     $wtArgs = [System.Collections.Generic.List[string]]::new()
@@ -417,8 +469,126 @@ function Remove-STWorkspace {
 
 #endregion
 
+#region tab vivi (sorgente per la UI: cosa e' aperto adesso, anche tab NON registrati/occupati)
+
+# Lettore nativo della cwd di un processo (PEB). Caricato una volta sola per sessione.
+if (-not ('STNative' -as [type])) {
+    try {
+        Add-Type -Language CSharp -TypeDefinition @'
+using System; using System.Text; using System.Runtime.InteropServices;
+public static class STNative {
+    [StructLayout(LayoutKind.Sequential)] struct PBI { public IntPtr R1; public IntPtr Peb; public IntPtr A; public IntPtr B; public IntPtr Id; public IntPtr R3; }
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h,int c,ref PBI p,int l,out int r);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(int a,bool i,int p);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool ReadProcessMemory(IntPtr h,IntPtr a,byte[] b,IntPtr s,out IntPtr r);
+    static IntPtr RP(IntPtr h,long a){byte[] b=new byte[8];IntPtr r;if(!ReadProcessMemory(h,(IntPtr)a,b,(IntPtr)8,out r))return IntPtr.Zero;return (IntPtr)BitConverter.ToInt64(b,0);}
+    public static string Cwd(int pid){
+        IntPtr h=OpenProcess(0x0410,false,pid); if(h==IntPtr.Zero) return null;
+        try{ PBI p=new PBI(); int r; if(NtQueryInformationProcess(h,0,ref p,Marshal.SizeOf(p),out r)!=0) return null;
+            IntPtr pp=RP(h,(long)p.Peb+0x20); if(pp==IntPtr.Zero) return null;
+            byte[] us=new byte[16]; IntPtr q; if(!ReadProcessMemory(h,(IntPtr)((long)pp+0x38),us,(IntPtr)16,out q)) return null;
+            ushort len=BitConverter.ToUInt16(us,0); long buf=BitConverter.ToInt64(us,8); if(len==0||buf==0) return null;
+            byte[] sb=new byte[len]; if(!ReadProcessMemory(h,(IntPtr)buf,sb,(IntPtr)len,out q)) return null;
+            return Encoding.Unicode.GetString(sb).TrimEnd('\0','\\');
+        } finally { CloseHandle(h); }
+    }
+}
+'@
+    } catch { }
+}
+
+function Get-STCwdSafe { param([int]$ProcId) if ('STNative' -as [type]) { try { [STNative]::Cwd($ProcId) } catch { $null } } else { $null } }
+
+# Converte una CommandLine di Win32 in una stringa eseguibile da PowerShell: & 'exe' args
+function ConvertTo-STRunnable {
+    param([string]$CommandLine)
+    if (-not $CommandLine) { return $null }
+    $cl = $CommandLine.Trim()
+    if ($cl.StartsWith('"')) {
+        $end = $cl.IndexOf('"', 1)
+        if ($end -lt 0) { return $cl }
+        $exe = $cl.Substring(1, $end - 1); $rest = $cl.Substring($end + 1).Trim()
+    } else {
+        $sp = $cl.IndexOf(' ')
+        if ($sp -lt 0) { $exe = $cl; $rest = '' } else { $exe = $cl.Substring(0, $sp); $rest = $cl.Substring($sp + 1).Trim() }
+    }
+    $exeEsc = $exe.Replace("'", "''")
+    if ($rest) { "& '$exeEsc' $rest" } else { "& '$exeEsc'" }
+}
+
+# Elenca i tab shell aperti (powershell/pwsh) con cosa ci gira dentro e dove. Sorgente =
+# scansione processi (PEB + Win32_Process): mostra ANCHE i tab non registrati o occupati.
+function Get-STLiveTab {
+    $all = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId, Name, CommandLine
+    if (-not $all) { return @() }
+    $kids = @{}
+    foreach ($p in $all) { $k = [int]$p.ParentProcessId; if (-not $kids.ContainsKey($k)) { $kids[$k] = @() }; $kids[$k] += $p }
+    $skip = @('conhost.exe', 'OpenConsole.exe')
+    $out = [System.Collections.Generic.List[object]]::new()
+    foreach ($s in ($all | Where-Object { $_.Name -in 'powershell.exe', 'pwsh.exe' })) {
+        $child = $null
+        $q = New-Object System.Collections.Queue
+        foreach ($c in $kids[[int]$s.ProcessId]) { $q.Enqueue($c) }
+        while ($q.Count -gt 0) {
+            $c = $q.Dequeue()
+            if ($c.Name -in $skip) { foreach ($g in $kids[[int]$c.ProcessId]) { $q.Enqueue($g) }; continue }
+            $child = $c; break
+        }
+        if ($child) {
+            $cwd = Get-STCwdSafe ([int]$child.ProcessId); if (-not $cwd) { $cwd = Get-STCwdSafe ([int]$s.ProcessId) }
+            $cmd = ConvertTo-STRunnable $child.CommandLine
+            $what = $child.Name -replace '\.exe$', ''
+        } else {
+            $cwd = Get-STCwdSafe ([int]$s.ProcessId); $cmd = $null; $what = 'shell'
+        }
+        $leaf = if ($cwd) { Split-Path $cwd -Leaf } else { '?' }
+        $out.Add([pscustomobject]@{
+            Pid     = [int]$s.ProcessId
+            Cwd     = $cwd
+            Command = $cmd
+            What    = $what
+            Label   = "$leaf  -  $what  [pid $($s.ProcessId)]"
+        })
+    }
+    $out
+}
+
+# Aggiunge uno o piu' tab a un'area (la crea se non esiste). Per la UI "aggiungi a gruppo".
+function Add-STWorkspaceTab {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][object[]]$Tabs
+    )
+    $dir = Get-STWorkspaceDir $Name
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $wj = Join-Path $dir 'workspace.json'
+    $list = [System.Collections.Generic.List[object]]::new()
+    if (Test-Path -LiteralPath $wj) {
+        $existing = Get-Content -LiteralPath $wj -Raw | ConvertFrom-Json
+        foreach ($t in @($existing.Tabs)) { if ($t) { $list.Add($t) } }
+    }
+    foreach ($t in $Tabs) {
+        $list.Add([pscustomobject]@{
+            Title   = $t.Title
+            Color   = $t.Color
+            Cwd     = $t.Cwd
+            Shell   = if ($t.Shell) { $t.Shell } else { 'powershell.exe' }
+            Command = $t.Command
+            Storico = $null
+        })
+    }
+    $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $list }
+    ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wj -Encoding utf8
+    Write-Host "STerminal: $($Tabs.Count) tab aggiunti all'area '$Name' (totale $($list.Count))." -ForegroundColor Green
+}
+
+#endregion
+
 Export-ModuleMember -Function Initialize-STerminal, Restore-STerminal, Set-STerminalTab,
     Get-STerminalStatus, Update-STHeartbeat, Get-STScrollbackBody, Get-STAliveSlots,
     Get-STOpenSlots, Read-STMeta, Write-STMeta, Get-STSlotDir,
-    Save-STWorkspace, Resume-STWorkspace, Get-STResumeTabSpec, Open-STWorkspaceTab,
-    Get-STWorkspace, Get-STWorkspaceDir, Remove-STWorkspace
+    Save-STWorkspace, New-STWorkspace, Add-STWorkspaceTab, Resume-STWorkspace, Get-STResumeTabSpec,
+    Open-STWorkspaceTab, Get-STWorkspace, Get-STWorkspaceDir, Remove-STWorkspace,
+    Get-STLiveTab, ConvertTo-STRunnable

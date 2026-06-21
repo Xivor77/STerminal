@@ -78,6 +78,39 @@ try {
     Section "EncodedCommand decodifica round-trip"
     $dec = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($specS.EncodedCommand))
     Check "base64 -> comando originale identico" ($dec -eq $specS.DecodedCommand)
+
+    Section "New-STWorkspace + comando per tab"
+    New-STWorkspace -Name 'sys' -Tabs @(
+        @{ Title='ORKAI'; Cwd=$dirs.normale; Command='& .\start.bat' }
+        @{ Title='Chat';  Cwd=$dirs.spazi;   Command=('claude --resume ' + $apos + 'abc' + $apos) }
+    ) | Out-Null
+    $sys = Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'sys') 'workspace.json') -Raw | ConvertFrom-Json
+    Check "New-STWorkspace: 2 tab"               ($sys.Tabs.Count -eq 2)
+    Check "comando per tab preservato"           ($sys.Tabs[0].Command -eq '& .\start.bat')
+    $specC = Get-STResumeTabSpec -Tab $sys.Tabs[1] -WorkspaceDir (Join-Path $wsDir 'sys') -WindowId 'w'
+    $e3 = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($specC.DecodedCommand, [ref]$null, [ref]$e3)
+    Check "comando con apostrofo -> Open valido"  (@($e3).Count -eq 0)
+    Check "comando finisce nel comando di Open"   ($specC.DecodedCommand -match 'claude --resume')
+
+    Section "Save-STWorkspace -Group (filtra per etichetta)"
+    foreach ($g in @(@{s='slotA'; t='gruppoA-tab'; grp='A'}, @{s='slotB'; t='gruppoB-tab'; grp='B'})) {
+        $sd = Join-Path $root $g.s; New-Item -ItemType Directory -Force -Path $sd | Out-Null
+        ([pscustomobject]@{ Slot=$g.s; Title=$g.t; Color=$null; Command=$null; Group=$g.grp; Cwd=$env:TEMP; Shell='powershell.exe'; Pid=$PID; Created=(Get-Date).ToString('o'); Heartbeat=(Get-Date).ToString('o'); Closed=$false } | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $sd 'meta.json') -Encoding utf8
+    }
+    Save-STWorkspace -Name 'soloA' -Group 'A' | Out-Null
+    $wa = Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'soloA') 'workspace.json') -Raw | ConvertFrom-Json
+    Check "Group A: catturato 1 solo tab"  (@($wa.Tabs).Count -eq 1)
+    Check "Group A: e' il tab giusto"      ($wa.Tabs[0].Title -eq 'gruppoA-tab')
+
+    Section "ConvertTo-STRunnable + Add-STWorkspaceTab"
+    Check "exe quotato -> & 'exe' args"  ((ConvertTo-STRunnable '"C:\py.exe" -m uvicorn') -eq "& 'C:\py.exe' -m uvicorn")
+    Check "exe senza virgolette"         ((ConvertTo-STRunnable 'caddy.exe run') -eq "& 'caddy.exe' run")
+    Add-STWorkspaceTab -Name 'addws' -Tabs @(@{Title='a'; Cwd=$root; Command='& .\x'}, @{Title='b'; Cwd=$root}) | Out-Null
+    Add-STWorkspaceTab -Name 'addws' -Tabs @(@{Title='c'; Cwd=$root}) | Out-Null
+    $addws = Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'addws') 'workspace.json') -Raw | ConvertFrom-Json
+    Check "Add-STWorkspaceTab accumula (3 tab)" (@($addws.Tabs).Count -eq 3)
+    Check "append: ultimo tab e' 'c'"           ($addws.Tabs[2].Title -eq 'c')
 }
 finally {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
