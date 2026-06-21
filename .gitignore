@@ -1,0 +1,6 @@
+# OS / editor
+Thumbs.db
+desktop.ini
+*.user
+
+# Lo stato runtime vive in ~/.sterminal (fuori dal repo), non qui.
