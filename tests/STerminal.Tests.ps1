@@ -111,6 +111,13 @@ try {
     $addws = Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'addws') 'workspace.json') -Raw | ConvertFrom-Json
     Check "Add-STWorkspaceTab accumula (3 tab)" (@($addws.Tabs).Count -eq 3)
     Check "append: ultimo tab e' 'c'"           ($addws.Tabs[2].Title -eq 'c')
+
+    Section "Add-STWorkspaceTab -AutoColor (colori distinti per tab)"
+    Add-STWorkspaceTab -Name 'colws' -Tabs @(@{Title='a'; Cwd=$root}, @{Title='b'; Cwd=$root}, @{Title='c'; Cwd=$root}) -AutoColor | Out-Null
+    $colws = Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'colws') 'workspace.json') -Raw | ConvertFrom-Json
+    $cols = @($colws.Tabs | ForEach-Object { $_.Color })
+    Check "AutoColor: 3 colori assegnati"  ((@($cols | Where-Object { $_ })).Count -eq 3)
+    Check "AutoColor: tutti distinti"      ((@($cols | Select-Object -Unique)).Count -eq 3)
 }
 finally {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }

@@ -555,11 +555,15 @@ function Get-STLiveTab {
 }
 
 # Aggiunge uno o piu' tab a un'area (la crea se non esiste). Per la UI "aggiungi a gruppo".
+# Tavolozza colori distinti per i tab (formato #rrggbb, onorato da wt --tabColor).
+$script:STPalette = @('#1FAA55','#2D7D9A','#3B7DD8','#8E44AD','#E67E22','#C0392B','#16A085','#D4A017','#E84393','#2C3E50','#7F8C8D','#2980B9')
+
 function Add-STWorkspaceTab {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][object[]]$Tabs
+        [Parameter(Mandatory)][object[]]$Tabs,
+        [switch]$AutoColor   # assegna a ogni tab senza colore il prossimo colore distinto della tavolozza
     )
     $dir = Get-STWorkspaceDir $Name
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -569,10 +573,18 @@ function Add-STWorkspaceTab {
         $existing = Get-Content -LiteralPath $wj -Raw | ConvertFrom-Json
         foreach ($t in @($existing.Tabs)) { if ($t) { $list.Add($t) } }
     }
+    $used = [System.Collections.Generic.List[string]]::new()
+    foreach ($e in $list) { if ($e.Color) { [void]$used.Add([string]$e.Color) } }
     foreach ($t in $Tabs) {
+        $color = $t.Color
+        if ($AutoColor -and -not $color) {
+            $color = $script:STPalette | Where-Object { $used -notcontains $_ } | Select-Object -First 1
+            if (-not $color) { $color = $script:STPalette[$list.Count % $script:STPalette.Count] }
+            [void]$used.Add($color)
+        }
         $list.Add([pscustomobject]@{
             Title   = $t.Title
-            Color   = $t.Color
+            Color   = $color
             Cwd     = $t.Cwd
             Shell   = if ($t.Shell) { $t.Shell } else { 'powershell.exe' }
             Command = $t.Command
