@@ -248,24 +248,21 @@ function Restore-STerminal {
     if (-not $slots) { Write-Host "STerminal: nessuna sessione da ripristinare." -ForegroundColor Yellow; return }
 
     Write-Host "STerminal: ripristino $($slots.Count) tab..." -ForegroundColor Cyan
-    # Tutti i tab in UNA finestra con nome fisso "STerminal": il primo new-tab la crea,
-    # i successivi vi si agganciano. Deterministico, non dirotta finestre WT esistenti.
+    # Una sola invocazione di wt con tutti i new-tab separati da ';' -> una finestra, N tab
+    # (niente raffica di processi wt, che andava in corsa e apriva finestre multiple).
+    $wtAll = [System.Collections.Generic.List[string]]::new()
     foreach ($s in $slots) {
         $exe = if ($s.Shell) { $s.Shell } else { 'powershell.exe' }
         $cmd = "Import-Module '$($script:STModulePath)'; Initialize-STerminal -RestoreSlot '$($s.Slot)'"
-        # base64 (UTF-16LE) -> nessuno spazio/;/virgoletta che WT possa interpretare male.
         $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
-
-        $wtArgs = [System.Collections.Generic.List[string]]::new()
-        $wtArgs.AddRange([string[]]@('-w', 'STerminal', 'new-tab'))
-        if ($s.Title)                                    { $wtArgs.AddRange([string[]]@('--title', $s.Title)) }
-        if ($s.Color)                                    { $wtArgs.AddRange([string[]]@('--tabColor', $s.Color)) }
-        if ($s.Cwd -and (Test-Path -LiteralPath $s.Cwd)) { $wtArgs.AddRange([string[]]@('-d', $s.Cwd)) }
-        $wtArgs.AddRange([string[]]@($exe, '-NoExit', '-EncodedCommand', $enc))
-
-        Start-Process -FilePath 'wt.exe' -ArgumentList $wtArgs.ToArray()
-        Start-Sleep -Milliseconds 600   # lascia a WT il tempo di creare/agganciare la finestra
+        if ($wtAll.Count -gt 0) { $wtAll.Add(';') }
+        $wtAll.Add('new-tab')
+        if ($s.Title)                                    { $wtAll.AddRange([string[]]@('--title', $s.Title)) }
+        if ($s.Color)                                    { $wtAll.AddRange([string[]]@('--tabColor', $s.Color)) }
+        if ($s.Cwd -and (Test-Path -LiteralPath $s.Cwd)) { $wtAll.AddRange([string[]]@('-d', $s.Cwd)) }
+        $wtAll.AddRange([string[]]@($exe, '-NoExit', '-EncodedCommand', $enc))
     }
+    if ($wtAll.Count -gt 0) { Start-Process -FilePath 'wt.exe' -ArgumentList $wtAll.ToArray() }
 }
 
 function Get-STerminalStatus {
@@ -405,14 +402,13 @@ function Open-STWorkspaceTab {
     }
 }
 
-# Costruisce gli argomenti wt e il comando base64 per UN tab di un'area, SENZA lanciarlo.
+# Costruisce gli argomenti wt per UN tab (frammento che parte da 'new-tab'), SENZA lanciarlo.
 # Separato dallo spawn cosi' e' testabile su percorsi/titoli difficili (spazi, apostrofi, accenti).
 function Get-STResumeTabSpec {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Tab,
-        [Parameter(Mandatory)][string]$WorkspaceDir,
-        [Parameter(Mandatory)][string]$WindowId
+        [Parameter(Mandatory)][string]$WorkspaceDir
     )
     $q = { param($s) if ($null -eq $s) { '' } else { ([string]$s).Replace("'", "''") } }
     $stor = if ($Tab.Storico) { Join-Path $WorkspaceDir $Tab.Storico } else { '' }
@@ -420,8 +416,10 @@ function Get-STResumeTabSpec {
     $cmd  = "Import-Module '$(& $q $script:STModulePath)'; Open-STWorkspaceTab -Storico '$(& $q $stor)' -Title '$(& $q $Tab.Title)' -Color '$(& $q $Tab.Color)' -Command '$(& $q $Tab.Command)'"
     $enc  = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
 
+    # NB: parte da 'new-tab' (niente -w): tutti i tab vanno in UNA sola invocazione di wt,
+    # separati da ';' -> stessa finestra, niente race / finestre multiple (bug del per-tab spawn).
     $wtArgs = [System.Collections.Generic.List[string]]::new()
-    $wtArgs.AddRange([string[]]@('-w', $WindowId, 'new-tab'))
+    $wtArgs.Add('new-tab')
     if ($Tab.Title) { $wtArgs.AddRange([string[]]@('--title', [string]$Tab.Title)) }
     if ($Tab.Color) { $wtArgs.AddRange([string[]]@('--tabColor', [string]$Tab.Color)) }
     if ($Tab.Cwd -and (Test-Path -LiteralPath ([string]$Tab.Cwd))) { $wtArgs.AddRange([string[]]@('-d', [string]$Tab.Cwd)) }
@@ -436,8 +434,21 @@ function Get-STResumeTabSpec {
     }
 }
 
-# Riapre un'area di lavoro: una finestra WT con i suoi tab, pre-colorati e titolati
-# (cosi' si scavalca il focus-jump #19970), nelle cartelle giuste, con lo storico.
+# Unisce i frammenti di tutti i tab in UNA riga di comando wt: new-tab ... ; new-tab ... ; ...
+function Get-STResumeArgs {
+    param([Parameter(Mandatory)][object[]]$Tabs, [Parameter(Mandatory)][string]$WorkspaceDir)
+    $all = [System.Collections.Generic.List[string]]::new()
+    foreach ($t in $Tabs) {
+        if (-not $t) { continue }
+        $spec = Get-STResumeTabSpec -Tab $t -WorkspaceDir $WorkspaceDir
+        if ($all.Count -gt 0) { $all.Add(';') }
+        $all.AddRange([string[]]$spec.WtArgs)
+    }
+    $all.ToArray()
+}
+
+# Riapre un'area di lavoro: UNA finestra WT con tutti i suoi tab, pre-colorati e titolati
+# (cosi' si scavalca il focus-jump #19970), nelle cartelle giuste, con lo storico e il comando.
 function Resume-STWorkspace {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Name)
@@ -448,13 +459,9 @@ function Resume-STWorkspace {
     $ws = Get-Content -LiteralPath $wj -Raw | ConvertFrom-Json
     if (-not $ws.Tabs) { Write-Warning "STerminal: area '$Name' senza tab."; return }
 
-    $winId = "STerminal-$Name"
     Write-Host "STerminal: riprendo area '$Name' ($(@($ws.Tabs).Count) tab)..." -ForegroundColor Cyan
-    foreach ($t in $ws.Tabs) {
-        $spec = Get-STResumeTabSpec -Tab $t -WorkspaceDir $dir -WindowId $winId
-        Start-Process -FilePath 'wt.exe' -ArgumentList $spec.WtArgs
-        Start-Sleep -Milliseconds 600
-    }
+    $wtAll = Get-STResumeArgs -Tabs @($ws.Tabs) -WorkspaceDir $dir
+    if ($wtAll.Count -gt 0) { Start-Process -FilePath 'wt.exe' -ArgumentList $wtAll }
 }
 
 function Remove-STWorkspace {
@@ -602,5 +609,5 @@ Export-ModuleMember -Function Initialize-STerminal, Restore-STerminal, Set-STerm
     Get-STerminalStatus, Update-STHeartbeat, Get-STScrollbackBody, Get-STAliveSlots,
     Get-STOpenSlots, Read-STMeta, Write-STMeta, Get-STSlotDir,
     Save-STWorkspace, New-STWorkspace, Add-STWorkspaceTab, Resume-STWorkspace, Get-STResumeTabSpec,
-    Open-STWorkspaceTab, Get-STWorkspace, Get-STWorkspaceDir, Remove-STWorkspace,
+    Get-STResumeArgs, Open-STWorkspaceTab, Get-STWorkspace, Get-STWorkspaceDir, Remove-STWorkspace,
     Get-STLiveTab, ConvertTo-STRunnable

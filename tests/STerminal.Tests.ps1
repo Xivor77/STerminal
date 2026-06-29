@@ -57,7 +57,7 @@ try {
     )
     foreach ($c in $cases) {
         $tab = [pscustomobject]@{ Title=$c.Title; Color='#1FAA55'; Cwd=$c.Cwd; Shell='powershell.exe'; Storico=$null }
-        $spec = Get-STResumeTabSpec -Tab $tab -WorkspaceDir $root -WindowId 'STerminal-x'
+        $spec = Get-STResumeTabSpec -Tab $tab -WorkspaceDir $root
         $e = $null
         [void][System.Management.Automation.Language.Parser]::ParseInput($spec.DecodedCommand, [ref]$null, [ref]$e)
         Check "[$($c.n)] comando valido (niente quote-break)"          (@($e).Count -eq 0)
@@ -69,7 +69,7 @@ try {
 
     Section "apostrofo NEL path dello storico (finisce nel comando)"
     $tabS = [pscustomobject]@{ Title='s'; Color=$null; Cwd=$dirs.normale; Shell='powershell.exe'; Storico='tab-0.log' }
-    $specS = Get-STResumeTabSpec -Tab $tabS -WorkspaceDir $dirs.apostrofo -WindowId 'w'
+    $specS = Get-STResumeTabSpec -Tab $tabS -WorkspaceDir $dirs.apostrofo
     $e2 = $null
     [void][System.Management.Automation.Language.Parser]::ParseInput($specS.DecodedCommand, [ref]$null, [ref]$e2)
     Check "comando valido con apostrofo nel path" (@($e2).Count -eq 0)
@@ -87,11 +87,19 @@ try {
     $sys = Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'sys') 'workspace.json') -Raw | ConvertFrom-Json
     Check "New-STWorkspace: 2 tab"               ($sys.Tabs.Count -eq 2)
     Check "comando per tab preservato"           ($sys.Tabs[0].Command -eq '& .\start.bat')
-    $specC = Get-STResumeTabSpec -Tab $sys.Tabs[1] -WorkspaceDir (Join-Path $wsDir 'sys') -WindowId 'w'
+    $specC = Get-STResumeTabSpec -Tab $sys.Tabs[1] -WorkspaceDir (Join-Path $wsDir 'sys')
     $e3 = $null
     [void][System.Management.Automation.Language.Parser]::ParseInput($specC.DecodedCommand, [ref]$null, [ref]$e3)
     Check "comando con apostrofo -> Open valido"  (@($e3).Count -eq 0)
     Check "comando finisce nel comando di Open"   ($specC.DecodedCommand -match 'claude --resume')
+
+    Section "Get-STResumeArgs - UNA invocazione wt (niente finestre multiple)"
+    $argv = Get-STResumeArgs -Tabs $sys.Tabs -WorkspaceDir (Join-Path $wsDir 'sys')
+    $nt   = @($argv | Where-Object { $_ -eq 'new-tab' }).Count
+    $semi = @($argv | Where-Object { $_ -eq ';' }).Count
+    Check "un 'new-tab' per tab (2)"   ($nt -eq 2)
+    Check "';' separatori = tab-1 (1)" ($semi -eq 1)
+    Check "niente -w (finestra unica)" (-not ($argv -contains '-w'))
 
     Section "Save-STWorkspace -Group (filtra per etichetta)"
     foreach ($g in @(@{s='slotA'; t='gruppoA-tab'; grp='A'}, @{s='slotB'; t='gruppoB-tab'; grp='B'})) {
