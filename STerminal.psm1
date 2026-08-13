@@ -324,6 +324,15 @@ function Save-STWorkspace {
     }
 
     $dir = Get-STWorkspaceDir $Name
+    # Il colore dell'area si legge PRIMA: qui sotto la cartella viene CANCELLATA e
+    # ricreata da zero, quindi rileggerlo dopo significa leggere un file che non c'e' piu'.
+    # (Ed era proprio il difetto: la sonda passava lo stesso, perche' il rimedio
+    # automatico riassegnava un colore che nel test capitava identico.)
+    $uiPrec = $null
+    $wjPrec = Join-Path $dir 'workspace.json'
+    if (Test-Path -LiteralPath $wjPrec) {
+        try { $uiPrec = (Get-Content -LiteralPath $wjPrec -Raw | ConvertFrom-Json).UiColor } catch { }
+    }
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
@@ -344,8 +353,11 @@ function Save-STWorkspace {
         $i++
     }
 
-    $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $tabs }
-    ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath (Join-Path $dir 'workspace.json') -Encoding utf8
+    # Il colore dell'area sopravvive al risalvataggio: Save ricrea il file da zero, e
+    # senza rileggerlo prima un salvataggio cancellerebbe quello che c'era.
+    $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $tabs; UiColor = $uiPrec }
+    ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wjPrec -Encoding utf8
+    if (-not $uiPrec) { [void](Set-STWorkspaceColor -Name $Name) }
     Write-Host "STerminal: area '$Name' salvata ($($tabs.Count) tab)." -ForegroundColor Green
 }
 
@@ -359,6 +371,15 @@ function New-STWorkspace {
         [Parameter(Mandatory)][object[]]$Tabs
     )
     $dir = Get-STWorkspaceDir $Name
+    # Il colore dell'area si legge PRIMA: qui sotto la cartella viene CANCELLATA e
+    # ricreata da zero, quindi rileggerlo dopo significa leggere un file che non c'e' piu'.
+    # (Ed era proprio il difetto: la sonda passava lo stesso, perche' il rimedio
+    # automatico riassegnava un colore che nel test capitava identico.)
+    $uiPrec = $null
+    $wjPrec = Join-Path $dir 'workspace.json'
+    if (Test-Path -LiteralPath $wjPrec) {
+        try { $uiPrec = (Get-Content -LiteralPath $wjPrec -Raw | ConvertFrom-Json).UiColor } catch { }
+    }
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $list = [System.Collections.Generic.List[object]]::new()
@@ -372,8 +393,9 @@ function New-STWorkspace {
             Storico = $null
         })
     }
-    $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $list }
-    ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath (Join-Path $dir 'workspace.json') -Encoding utf8
+    $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $list; UiColor = $uiPrec }
+    ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wjPrec -Encoding utf8
+    if (-not $uiPrec) { [void](Set-STWorkspaceColor -Name $Name) }
     Write-Host "STerminal: area '$Name' definita ($($list.Count) tab)." -ForegroundColor Green
 }
 
@@ -555,6 +577,12 @@ function Get-STLiveTab {
             Cwd     = $cwd
             Command = $cmd
             What    = $what
+            # La shell VERA del tab: qui si distingue gia' powershell.exe da pwsh.exe
+            # (v. il filtro sopra), ma prima non usciva da questa funzione -- e allora
+            # tutto arrivava al motore come 'powershell.exe', firma compresa. Referto
+            # Tommaso 13/08, rilievo 1: una firma che dichiara di guardare la shell e
+            # non la vede mai e' peggio che non guardarla, perche' ci si fida.
+            Shell   = $s.Name
             Label   = "$leaf  -  $what  [pid $($s.ProcessId)]"
         })
     }
@@ -565,24 +593,266 @@ function Get-STLiveTab {
 # Tavolozza colori distinti per i tab (formato #rrggbb, onorato da wt --tabColor).
 $script:STPalette = @('#1FAA55','#2D7D9A','#3B7DD8','#8E44AD','#E67E22','#C0392B','#16A085','#D4A017','#E84393','#2C3E50','#7F8C8D','#2980B9')
 
+function Get-STTabSignature {
+    <#
+    .SYNOPSIS
+    La "ricetta" di un tab: cartella + shell + comando, normalizzati.
+
+    .DESCRIPTION
+    NON e' l'identita' del tab, ed e' importante non confonderle: due tab aperti di
+    proposito nella stessa cartella con lo stesso comando hanno la STESSA ricetta e
+    sono due tab diversi. Questa firma serve a dire "ricetta gia' presente", che e'
+    un'altra frase da "gia' appartenente" (quella richiedera' un identificatore stabile,
+    fase 2). Referto Tommaso 13/08, rilievo 2.
+
+    Regole di normalizzazione, e i loro perche':
+      Cwd     - sintattica soltanto: separatori uniformati, barra finale tolta salvo
+                la radice di un drive, confronto senza distinzione di maiuscole.
+                MAI Resolve-Path: dipenderebbe da cosa esiste in questo momento e dai
+                collegamenti del filesystem, cioe' la firma cambierebbe nel tempo.
+      Shell   - token senza distinzione di maiuscole; due eseguibili in cartelle diverse
+                NON sono la stessa shell, quindi il percorso non si tocca.
+      Command - null e stringa vuota sono la stessa cosa ("nessun comando"); per il resto
+                solo trim esterno e confronto CASE-SENSITIVE. Gli argomenti possono essere
+                sensibili alle maiuscole, e un falso negativo (due ricette che restano
+                distinte) costa meno che fondere due ricette diverse.
+
+    Con Command assente la firma e' DEBOLE: distingue solo per cartella e shell.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Tab)
+
+    $cwd = if ($null -ne $Tab.Cwd) { ([string]$Tab.Cwd).Trim() } else { '' }
+    if ($cwd) {
+        $cwd = $cwd.Replace('/', '\')
+        # Collasso di "." e ".." SINTATTICO (referto Tommaso 13/08, rilievo 3):
+        # C:\a\..\b e C:\b sono la stessa cartella e devono avere la stessa ricetta.
+        # A mano e non con Resolve-Path/GetFullPath, perche' quelli guardano il disco:
+        # dipenderebbero da cosa esiste ADESSO e dalla cartella corrente del processo,
+        # cioe' la firma cambierebbe nel tempo e da chi la calcola.
+        $prefisso = ''
+        $resto    = $cwd
+        # La barra dopo il drive si conserva SOLO se c'era: "C:\" e' la radice, "C:" e' la
+        # cartella corrente su quel drive. Sono due posti diversi e non vanno fusi --
+        # stessa regola del comando: meglio due ricette che restano distinte.
+        if ($cwd -match '^([A-Za-z]:)(\\?)(.*)$') {         # C:  oppure C:\...
+            $prefisso = $matches[1] + $matches[2]; $resto = $matches[3]
+        } elseif ($cwd -match '^(\\\\[^\\]+\\[^\\]+)\\?(.*)$') {  # \\server\condivisione
+            $prefisso = $matches[1] + '\'; $resto = $matches[2]
+        }
+        $pila = [System.Collections.Generic.List[string]]::new()
+        foreach ($seg in ($resto -split '\\')) {
+            if ($seg -eq '' -or $seg -eq '.') { continue }
+            if ($seg -eq '..') {
+                # Sopra la radice non si sale: C:\..\.. resta C:\ .
+                # Su percorso relativo l'ultimo segmento si toglie solo se non e' gia'
+                # un '..': altrimenti '..\..' si mangerebbe da solo e diventerebbe vuoto,
+                # cioe' due cartelle sopra si trasformerebbero in "qui".
+                if ($pila.Count -and ($prefisso -or $pila[$pila.Count-1] -ne '..')) {
+                    $pila.RemoveAt($pila.Count - 1)
+                } elseif (-not $prefisso) { [void]$pila.Add('..') }
+                continue
+            }
+            [void]$pila.Add($seg)
+        }
+        $cwd = $prefisso + ($pila -join '\')
+        # La radice di un drive ("C:\") tiene la sua barra; tutto il resto la perde.
+        if ($cwd.Length -gt 3 -and $cwd.EndsWith('\')) { $cwd = $cwd.TrimEnd('\') }
+        $cwd = $cwd.ToLowerInvariant()
+    }
+    $shell = if ($Tab.Shell) { ([string]$Tab.Shell).Trim().ToLowerInvariant() } else { 'powershell.exe' }
+    $cmd   = if ($null -ne $Tab.Command) { ([string]$Tab.Command).Trim() } else { '' }
+    # Il separatore e' un carattere che non puo' comparire in un percorso Windows.
+    "$cwd|$shell|$cmd"
+}
+
+function Test-STWeakSignature {
+    # Vero quando la ricetta non ha comando: distingue solo cartella e shell, quindi
+    # due voci "uguali" possono benissimo essere due cose diverse. Serve a DIRLO,
+    # non a cambiare comportamento.
+    param([Parameter(Mandatory)][object]$Tab)
+    -not ($null -ne $Tab.Command -and ([string]$Tab.Command).Trim())
+}
+
+# Tavolozza per il colore dell'AREA: e' un'altra cosa dal colore del tab (Tab.Color, che
+# finisce a `wt --tabColor` quando si riapre). Referto Tommaso 13/08, rilievo 4: se si
+# usasse lo stesso campo, cambiare l'appartenenza cambierebbe anche come si riapre il tab.
+$script:STAreaPalette = @('#3B7DD8','#1FAA55','#E67E22','#8E44AD','#C0392B','#16A085','#D4A017','#E84393','#2D7D9A','#7F8C8D')
+
+function Set-STWorkspaceColor {
+    <#
+    .SYNOPSIS
+    Assegna (o cambia) il colore con cui l'area si riconosce a colpo d'occhio.
+    .DESCRIPTION
+    Senza -Color ne sceglie uno non ancora usato da altre aree. Non tocca i colori dei
+    singoli tab.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name, [string]$Color)
+
+    $dir = Get-STWorkspaceDir $Name
+    $wj  = Join-Path $dir 'workspace.json'
+    if (-not (Test-Path -LiteralPath $wj)) { throw "area '$Name' inesistente" }
+    $ws = Get-Content -LiteralPath $wj -Raw | ConvertFrom-Json
+    if (-not $Color) {
+        $presi = @(Get-STWorkspace | Where-Object { $_.Name -ne $Name } | ForEach-Object { $_.UiColor } | Where-Object { $_ })
+        $Color = $script:STAreaPalette | Where-Object { $presi -notcontains $_ } | Select-Object -First 1
+        if (-not $Color) { $Color = $script:STAreaPalette[(@(Get-STWorkspace).Count) % $script:STAreaPalette.Count] }
+    }
+    # Il campo puo' non esistere nei file scritti prima d'ora: si aggiunge senza migrare
+    # nulla e senza toccare i tab.
+    if ($ws.PSObject.Properties.Name -contains 'UiColor') { $ws.UiColor = $Color }
+    else { $ws | Add-Member -NotePropertyName UiColor -NotePropertyValue $Color }
+    ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wj -Encoding utf8
+    $Color
+}
+
+function Get-STLiveTabAreas {
+    <#
+    .SYNOPSIS
+    Per ogni tab vivo, le aree che contengono una voce con la STESSA RICETTA.
+
+    .DESCRIPTION
+    ⚠️ Dice "ricetta compatibile", NON "e' proprio quel tab": finche' non esiste un
+    identificatore stabile (fase 3), due tab gemelli aperti di proposito nella stessa
+    cartella sono indistinguibili. Chi mostra questo dato deve dirlo come lo dice qui.
+    Ritorna i tab vivi con in piu': Aree (nomi), AreaColor (colore della prima), Certezza.
+    #>
+    [CmdletBinding()]
+    param([object[]]$LiveTabs, [object[]]$Aree)
+
+    if (-not $PSBoundParameters.ContainsKey('LiveTabs')) { $LiveTabs = @(Get-STLiveTab) }
+    if (-not $PSBoundParameters.ContainsKey('Aree'))     { $Aree     = @(Get-STWorkspace) }
+
+    # DUE indici, perche' due sono i gradi di riconoscimento possibili oggi.
+    #
+    # Il secondo esiste per un motivo misurato sul campo (13/08): nell'area `sistema`,
+    # salvata a giugno, i comandi hanno gli argomenti fra apici; i processi vivi no.
+    #   area:      python.exe 'C:\projects\chatbot\main.py'
+    #   processo:  python.exe  C:\projects\chatbot\main.py
+    # Stesso comando, scritto diverso -> la ricetta non combaciava, e cinque tab su sei
+    # restavano spenti. Le virgolette NON si normalizzano (referto Tommaso, rilievo 2:
+    # riscrivere gli argomenti rischia di fondere comandi che non sono lo stesso), quindi
+    # si aggiunge un grado piu' debole invece di ammorbidire quello preciso.
+    # Ordinal, non @{}: una hashtable di PowerShell confronta le chiavi SENZA distinguere
+    # le maiuscole, e avrebbe annullato proprio la regola che Add difende sul comando.
+    $perFirma = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
+    $perCwd   = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
+    foreach ($a in $Aree) {
+        foreach ($t in @($a.Tabs)) {
+            if (-not $t) { continue }
+            $voce = [pscustomobject]@{ Name = $a.Name; UiColor = $a.UiColor }
+            $f = Get-STTabSignature $t
+            if (-not $perFirma.ContainsKey($f)) { $perFirma[$f] = [System.Collections.Generic.List[object]]::new() }
+            if ($perFirma[$f].Name -notcontains $a.Name) { [void]$perFirma[$f].Add($voce) }
+            # solo la cartella: la parte della ricetta che non dipende da come e' scritto
+            $c = Get-STTabSignature @{ Cwd = $t.Cwd; Shell = 'x'; Command = $null }
+            if (-not $perCwd.ContainsKey($c)) { $perCwd[$c] = [System.Collections.Generic.List[object]]::new() }
+            if ($perCwd[$c].Name -notcontains $a.Name) { [void]$perCwd[$c].Add($voce) }
+        }
+    }
+    foreach ($lt in @($LiveTabs)) {
+        # Il null va tolto PRIMA di contare: @($hash['assente']) e' @($null), Count 1.
+        $trovate = @($perFirma[(Get-STTabSignature $lt)] | Where-Object { $_ })
+        $grado   = 'ricetta'
+        if (-not $trovate.Count) {
+            # ripiego: stessa cartella. Piu' largo -- due tab aperti nella stessa cartella
+            # risultano entrambi "gia' in quell'area" -- ma per non riaggiungere qualcosa
+            # per sbaglio un avviso in piu' e' meglio di un riconoscimento mancato.
+            $trovate = @($perCwd[(Get-STTabSignature @{ Cwd = $lt.Cwd; Shell = 'x'; Command = $null })] | Where-Object { $_ })
+            $grado   = if ($trovate.Count) { 'cartella' } else { 'nessuna' }
+        }
+        [pscustomobject]@{
+            Pid       = $lt.Pid
+            Cwd       = $lt.Cwd
+            Command   = $lt.Command
+            What      = $lt.What
+            Shell     = $lt.Shell
+            Label     = $lt.Label
+            Aree      = @($trovate | Where-Object { $_ } | ForEach-Object { $_.Name })
+            AreaColor = @($trovate | Where-Object { $_ -and $_.UiColor } | ForEach-Object { $_.UiColor })[0]
+            # 'ricetta' = cartella+shell+comando · 'cartella' = solo la cartella
+            # fase 3: 'identita' quando esistera' un EntryId
+            Certezza  = $grado
+        }
+    }
+}
+
+function Get-STLiveRowSpec {
+    <#
+    .SYNOPSIS
+    Come si scrive e si colora una riga della lista "Tab aperti".
+
+    .DESCRIPTION
+    Sta nel modulo, e non dentro la finestra, per un motivo preciso: e' il pezzo che
+    realizza la cosa chiesta -- vedere a colpo d'occhio cosa e' gia' in un'area -- e
+    dentro un gestore WPF non lo proverebbe nessuno (referto §9-10.1, rilievo 5).
+
+    Il TESTO dichiara quanto ne sappiamo: senza suffisso quando la ricetta combacia
+    (cartella + shell + comando), con "(stessa cartella)" quando e' solo il ripiego.
+    Cinque dei sei tab riconosciuti oggi stanno nel secondo caso, e la riga non deve
+    farli sembrare certi (rilievo 2).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Tab)
+
+    $aree = @($Tab.Aree | Where-Object { $_ })
+    if (-not $aree.Count) {
+        return [pscustomobject]@{ Testo = [string]$Tab.Label; Colore = $null; Certezza = 'nessuna' }
+    }
+    $suffisso = if ($Tab.Certezza -eq 'cartella') { '  (stessa cartella)' } else { '' }
+    [pscustomobject]@{
+        Testo    = "$($Tab.Label)   in: $($aree -join ', ')$suffisso"
+        Colore   = $Tab.AreaColor
+        Certezza = $Tab.Certezza
+    }
+}
+
 function Add-STWorkspaceTab {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][object[]]$Tabs,
-        [switch]$AutoColor   # assegna a ogni tab senza colore il prossimo colore distinto della tavolozza
+        [switch]$AutoColor,       # assegna a ogni tab senza colore il prossimo colore distinto della tavolozza
+        [switch]$AllowDuplicate   # aggiunge anche cio' che c'e' gia': i gemelli VOLUTI
     )
+    # IDEMPOTENTE PER DEFAULT (referto Tommaso 13/08, rilievo 3). Prima accodava sempre,
+    # e nelle aree di Vittorio si erano formate coppie identiche: `Riprendi` apriva quattro
+    # claude nella stessa cartella. La difesa sta QUI e non nell'interfaccia, perche'
+    # questa funzione e' esportata e chiamabile a comandi: una difesa che vive solo nella
+    # UI protegge una strada sola.
+    # Chi vuole davvero due tab gemelli lo dice con -AllowDuplicate: un gesto deliberato,
+    # non un caso.
     $dir = Get-STWorkspaceDir $Name
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $wj = Join-Path $dir 'workspace.json'
     $list = [System.Collections.Generic.List[object]]::new()
+    $uiColor = $null
     if (Test-Path -LiteralPath $wj) {
         $existing = Get-Content -LiteralPath $wj -Raw | ConvertFrom-Json
         foreach ($t in @($existing.Tabs)) { if ($t) { $list.Add($t) } }
+        $uiColor = $existing.UiColor    # il colore dell'area non si perde riaggiungendo tab
     }
+    # Ordinal: il comando distingue le maiuscole (v. Get-STTabSignature).
+    $firme = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($e in $list) { [void]$firme.Add((Get-STTabSignature $e)) }
+
     $used = [System.Collections.Generic.List[string]]::new()
     foreach ($e in $list) { if ($e.Color) { [void]$used.Add([string]$e.Color) } }
+
+    $aggiunti = 0; $saltati = 0; $deboli = 0
     foreach ($t in $Tabs) {
+        if (-not $AllowDuplicate) {
+            $firma = Get-STTabSignature $t
+            # Il controllo vale anche DENTRO il lotto: due voci uguali passate insieme
+            # sono un doppione quanto una gia' presente sul disco.
+            if ($firme.Contains($firma)) {
+                $saltati++
+                if (Test-STWeakSignature $t) { $deboli++ }
+                continue
+            }
+            [void]$firme.Add($firma)
+        }
         $color = $t.Color
         if ($AutoColor -and -not $color) {
             $color = $script:STPalette | Where-Object { $used -notcontains $_ } | Select-Object -First 1
@@ -597,10 +867,33 @@ function Add-STWorkspaceTab {
             Command = $t.Command
             Storico = $null
         })
+        $aggiunti++
     }
-    $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $list }
+    $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $list; UiColor = $uiColor }
     ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wj -Encoding utf8
-    Write-Host "STerminal: $($Tabs.Count) tab aggiunti all'area '$Name' (totale $($list.Count))." -ForegroundColor Green
+    # Un'area senza colore non si riconosce nella lista dei tab vivi: se ne prende uno
+    # non ancora usato dalle altre. Il colore dell'AREA, non quello dei tab.
+    if (-not $uiColor) { [void](Set-STWorkspaceColor -Name $Name) }
+
+    $msg = "STerminal: $aggiunti tab aggiunti all'area '$Name' (totale $($list.Count))."
+    if ($saltati) {
+        $msg += " $saltati gia' presenti, saltati."
+        # Un salto muto somiglia a un guasto: se la ricetta era debole (nessun comando)
+        # va detto, perche' li' "uguale" significa solo "stessa cartella e stessa shell".
+        if ($deboli) { $msg += " Di questi $deboli senza comando: ricetta debole, usa -AllowDuplicate se sono tab diversi." }
+    }
+    Write-Host $msg -ForegroundColor $(if ($saltati) { 'Yellow' } else { 'Green' })
+
+    # Risultato STRUTTURATO: chi chiama deve poter dire cosa e' successo davvero, invece
+    # di annunciare il numero che aveva chiesto. SkippedExact resta 0 finche' non esiste
+    # l'identita' certa (fase 2): la forma del risultato non cambiera' quando arrivera'.
+    [pscustomobject]@{
+        Name          = $Name
+        Added         = $aggiunti
+        SkippedExact  = 0
+        SkippedRecipe = $saltati
+        Total         = $list.Count
+    }
 }
 
 #endregion
@@ -610,4 +903,4 @@ Export-ModuleMember -Function Initialize-STerminal, Restore-STerminal, Set-STerm
     Get-STOpenSlots, Read-STMeta, Write-STMeta, Get-STSlotDir,
     Save-STWorkspace, New-STWorkspace, Add-STWorkspaceTab, Resume-STWorkspace, Get-STResumeTabSpec,
     Get-STResumeArgs, Open-STWorkspaceTab, Get-STWorkspace, Get-STWorkspaceDir, Remove-STWorkspace,
-    Get-STLiveTab, ConvertTo-STRunnable
+    Get-STLiveTab, ConvertTo-STRunnable, Get-STTabSignature, Set-STWorkspaceColor, Get-STLiveTabAreas, Get-STLiveRowSpec

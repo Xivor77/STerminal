@@ -16,6 +16,18 @@ $egrave = [char]0x00E8   # e accentata
 $root  = Join-Path $env:TEMP ('st_test_' + [guid]::NewGuid().ToString('n').Substring(0,8))
 $wsDir = Join-Path $root 'workspaces'
 & (Get-Module STerminal) { param($r,$w) $script:STRoot=$r; $script:STWorkspaces=$w } $root $wsDir
+
+# L'ISOLAMENTO SI VERIFICA, NON SI SPERA. Se `Get-Module STerminal` non trova il modulo
+# (per esempio perche' e' stato importato sotto un altro nome, come capita provando un
+# mutante), l'iniezione qui sopra fallisce IN SILENZIO e il modulo continua a puntare a
+# $HOME\.sterminal: il banco scrive allora nelle aree VERE. E' successo il 13/08 alle
+# 20:41 -- la suite ha creato un'area 'rt' fra quelle di Vittorio, con 13 tab e i loro
+# storici. Il sintomo che avevo visto (un mutante che "non partiva") era questo, e l'ho
+# letto come un guasto del mutante invece di chiedermi DOVE stesse scrivendo.
+$visto = & (Get-Module STerminal) { $script:STWorkspaces }
+if ($visto -ne $wsDir) {
+    throw "isolamento del banco FALLITO: il modulo punta a '$visto' invece che a '$wsDir'. Non eseguo: scriverei nelle aree vere."
+}
 $delim = [string]$star * 22
 
 try {
@@ -114,18 +126,238 @@ try {
     Section "ConvertTo-STRunnable + Add-STWorkspaceTab"
     Check "exe quotato -> & 'exe' args"  ((ConvertTo-STRunnable '"C:\py.exe" -m uvicorn') -eq "& 'C:\py.exe' -m uvicorn")
     Check "exe senza virgolette"         ((ConvertTo-STRunnable 'caddy.exe run') -eq "& 'caddy.exe' run")
-    Add-STWorkspaceTab -Name 'addws' -Tabs @(@{Title='a'; Cwd=$root; Command='& .\x'}, @{Title='b'; Cwd=$root}) | Out-Null
-    Add-STWorkspaceTab -Name 'addws' -Tabs @(@{Title='c'; Cwd=$root}) | Out-Null
+    # NB: prima questa sezione pretendeva l'ACCODAMENTO ('c' aveva la stessa ricetta di
+    # 'b' -- stessa cwd, nessun comando -- e il test chiedeva totale 3). Con il dedup
+    # quella prova diventa rossa, ed e' giusto cosi': consacrava il difetto.
+    $r1 = Add-STWorkspaceTab -Name 'addws' -Tabs @(@{Title='a'; Cwd=$root; Command='& .\x'}, @{Title='b'; Cwd=$root})
+    Check "prima aggiunta: 2 tab"            ($r1.Added -eq 2 -and $r1.Total -eq 2)
+    $r2 = Add-STWorkspaceTab -Name 'addws' -Tabs @(@{Title='c'; Cwd=$root})
+    Check "ricetta gia' presente: saltata"   ($r2.Added -eq 0 -and $r2.SkippedRecipe -eq 1)
     $addws = Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'addws') 'workspace.json') -Raw | ConvertFrom-Json
-    Check "Add-STWorkspaceTab accumula (3 tab)" (@($addws.Tabs).Count -eq 3)
-    Check "append: ultimo tab e' 'c'"           ($addws.Tabs[2].Title -eq 'c')
+    Check "l'area resta di 2 tab"            (@($addws.Tabs).Count -eq 2)
+    Check "e 'c' non c'e'"                   (-not (@($addws.Tabs | Where-Object { $_.Title -eq 'c' })))
+
+    $r3 = Add-STWorkspaceTab -Name 'addws' -Tabs @(@{Title='c'; Cwd=$root}) -AllowDuplicate
+    Check "-AllowDuplicate: il gemello entra" ($r3.Added -eq 1 -and $r3.Total -eq 3)
+
+    Section "Add-STWorkspaceTab: doppioni DENTRO lo stesso lotto"
+    $r4 = Add-STWorkspaceTab -Name 'lotto' -Tabs @(
+        @{Title='x'; Cwd=$root; Command='& .\y'},
+        @{Title='x-bis'; Cwd=$root; Command='& .\y'})
+    Check "due voci uguali nello stesso lotto: una sola entra" ($r4.Added -eq 1 -and $r4.SkippedRecipe -eq 1)
+
+    # Questa prova nasce da un mutante SOPRAVVISSUTO: rendendo il confronto delle firme
+    # insensibile alle maiuscole, tutto restava verde -- perche' le sonde qui sotto
+    # provano Get-STTabSignature in isolamento, non il confronto DENTRO l'aggiunta.
+    # Due proprieta' diverse vogliono due prove diverse.
+    $r5 = Add-STWorkspaceTab -Name 'caso' -Tabs @(
+        @{Title='su';  Cwd=$root; Command='& .\x -Flag'},
+        @{Title='giu'; Cwd=$root; Command='& .\x -flag'})
+    Check "comandi diversi solo per maiuscole: entrano entrambi" ($r5.Added -eq 2 -and $r5.SkippedRecipe -eq 0)
+
+    Section "Get-STTabSignature (la ricetta, non l'identita')"
+    $cwdMaiusc = $root.ToUpperInvariant() + '\'
+    Check "cwd: maiuscole e barra finale non contano" (
+        (Get-STTabSignature @{Cwd=$root}) -ceq (Get-STTabSignature @{Cwd=$cwdMaiusc}))
+    Check "cwd: le barre / e \ sono lo stesso percorso" (
+        (Get-STTabSignature @{Cwd='C:\a\b'}) -ceq (Get-STTabSignature @{Cwd='C:/a/b'}))
+    # C:\ e C: NON sono lo stesso posto (il secondo e' "la cartella corrente sul drive C"),
+    # quindi la barra della radice non va tolta. Confrontare C:\ con se stesso non
+    # proverebbe niente: passerebbe anche cancellando tutta la normalizzazione.
+    Check "cwd: la radice del drive tiene la sua barra" (
+        (Get-STTabSignature @{Cwd='C:\'}) -cne (Get-STTabSignature @{Cwd='C:'}))
+    Check "comando: null e stringa vuota sono la stessa cosa" (
+        (Get-STTabSignature @{Cwd=$root; Command=$null}) -ceq (Get-STTabSignature @{Cwd=$root; Command='  '}))
+    Check "comando: le MAIUSCOLE contano (argomenti sensibili)" (
+        (Get-STTabSignature @{Cwd=$root; Command='& .\x -Flag'}) -cne (Get-STTabSignature @{Cwd=$root; Command='& .\x -flag'}))
+    Check "shell diversa = ricetta diversa" (
+        (Get-STTabSignature @{Cwd=$root; Shell='powershell.exe'}) -cne (Get-STTabSignature @{Cwd=$root; Shell='pwsh.exe'}))
+    Check "shell: stesso nome, percorsi diversi NON si equiparano" (
+        (Get-STTabSignature @{Cwd=$root; Shell='C:\a\pwsh.exe'}) -cne (Get-STTabSignature @{Cwd=$root; Shell='C:\b\pwsh.exe'}))
+    Check "shell assente = powershell.exe" (
+        (Get-STTabSignature @{Cwd=$root}) -ceq (Get-STTabSignature @{Cwd=$root; Shell='PowerShell.exe'}))
+
+    Section "Get-STTabSignature: canonicalizzazione sintattica della cwd"
+    Check "'..' si collassa"                (
+        (Get-STTabSignature @{Cwd='C:\a\..\b'}) -ceq (Get-STTabSignature @{Cwd='C:\b'}))
+    Check "'.' sparisce"                    (
+        (Get-STTabSignature @{Cwd='C:\a\.\b'}) -ceq (Get-STTabSignature @{Cwd='C:\a\b'}))
+    Check "'..' multipli"                   (
+        (Get-STTabSignature @{Cwd='C:\a\b\c\..\..\d'}) -ceq (Get-STTabSignature @{Cwd='C:\a\d'}))
+    Check "non si sale sopra la radice"     (
+        (Get-STTabSignature @{Cwd='C:\..\..'}) -ceq (Get-STTabSignature @{Cwd='C:\'}))
+    Check "UNC: il prefisso resta intero"   (
+        (Get-STTabSignature @{Cwd='\\srv\share\a\..\b'}) -ceq (Get-STTabSignature @{Cwd='\\srv\share\b'}))
+    Check "UNC non collassa nel prefisso"   (
+        (Get-STTabSignature @{Cwd='\\srv\share\..\..'}) -ceq (Get-STTabSignature @{Cwd='\\srv\share'}))
+    Check "doppie barre interne ignorate"   (
+        (Get-STTabSignature @{Cwd='C:\a\\b'}) -ceq (Get-STTabSignature @{Cwd='C:\a\b'}))
+    # Un percorso relativo non si finge assoluto: non sappiamo rispetto a cosa.
+    Check "relativo: resta relativo, ma pulito" (
+        (Get-STTabSignature @{Cwd='a\..\b'}) -ceq (Get-STTabSignature @{Cwd='b'}))
+    Check "relativo e assoluto NON si confondono" (
+        (Get-STTabSignature @{Cwd='b'}) -cne (Get-STTabSignature @{Cwd='C:\b'}))
+
+    Section "la shell del tab vivo arriva fino alla firma (end-to-end)"
+    # Il difetto era qui: Get-STLiveTab distingueva pwsh da powershell e poi la shell
+    # si perdeva, quindi tutto diventava powershell.exe. Riproduco la proiezione che fa
+    # la UI, nelle DUE modalita' del dialogo.
+    $vivo = [pscustomobject]@{ Pid=1; Cwd='C:\x'; Command='& tool'; What='pwsh'; Shell='pwsh.exe'; Label='x - pwsh [1]' }
+    $proiAuto = @{ Title = $vivo.What; Cwd = $vivo.Cwd; Command = $vivo.Command; Shell = $vivo.Shell }
+    $proiMan  = @{ Title = 'a mano'; Color = '#1FAA55'; Cwd = $vivo.Cwd; Command = $vivo.Command; Shell = $vivo.Shell }
+    Check "modo automatico: la shell sopravvive" (
+        (Get-STTabSignature $proiAuto) -ceq (Get-STTabSignature @{Cwd='C:\x'; Command='& tool'; Shell='pwsh.exe'}))
+    Check "modo per-tab: la shell sopravvive"    (
+        (Get-STTabSignature $proiMan) -ceq (Get-STTabSignature $proiAuto))
+    Check "pwsh e powershell NON collidono"      (
+        (Get-STTabSignature $proiAuto) -cne (Get-STTabSignature @{Cwd='C:\x'; Command='& tool'; Shell='powershell.exe'}))
+    $rp = Add-STWorkspaceTab -Name 'shells' -Tabs @(
+        @{Title='ps';   Cwd='C:\x'; Command='& tool'; Shell='powershell.exe'},
+        @{Title='pwsh'; Cwd='C:\x'; Command='& tool'; Shell='pwsh.exe'})
+    Check "due shell diverse entrano entrambe"   ($rp.Added -eq 2)
+    $rp2 = Add-STWorkspaceTab -Name 'shells' -Tabs @(@{Title='pwsh-bis'; Cwd='C:\x'; Command='& tool'; Shell='pwsh.exe'})
+    Check "lo stesso pwsh non rientra"           ($rp2.Added -eq 0 -and $rp2.SkippedRecipe -eq 1)
+    Check "Get-STLiveTab espone Shell" (
+        (@(Get-STLiveTab) | Where-Object { $_.PSObject.Properties.Name -contains 'Shell' }).Count -eq @(Get-STLiveTab).Count)
 
     Section "Add-STWorkspaceTab -AutoColor (colori distinti per tab)"
-    Add-STWorkspaceTab -Name 'colws' -Tabs @(@{Title='a'; Cwd=$root}, @{Title='b'; Cwd=$root}, @{Title='c'; Cwd=$root}) -AutoColor | Out-Null
+    # Ricette distinte di proposito: qui si prova il COLORE, non il dedup.
+    Add-STWorkspaceTab -Name 'colws' -Tabs @(
+        @{Title='a'; Cwd=(Join-Path $root 'a')},
+        @{Title='b'; Cwd=(Join-Path $root 'b')},
+        @{Title='c'; Cwd=(Join-Path $root 'c')}) -AutoColor | Out-Null
     $colws = Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'colws') 'workspace.json') -Raw | ConvertFrom-Json
     $cols = @($colws.Tabs | ForEach-Object { $_.Color })
     Check "AutoColor: 3 colori assegnati"  ((@($cols | Where-Object { $_ })).Count -eq 3)
     Check "AutoColor: tutti distinti"      ((@($cols | Select-Object -Unique)).Count -eq 3)
+
+    Section "colore dell'AREA (fase 2)"
+    $c1 = Set-STWorkspaceColor -Name 'addws'
+    $c2 = Set-STWorkspaceColor -Name 'colws'
+    Check "un'area riceve un colore"        ($c1 -match '^#[0-9A-Fa-f]{6}$')
+    Check "due aree, colori diversi"        ($c1 -ne $c2)
+    $riletto = @(Get-STWorkspace | Where-Object { $_.Name -eq 'addws' })[0]
+    Check "il colore si rilegge dal file"   ($riletto.UiColor -eq $c1)
+    Check "i colori dei TAB non cambiano"   (@($riletto.Tabs | Where-Object { $_.Color -eq $c1 }).Count -eq 0)
+    Set-STWorkspaceColor -Name 'addws' -Color '#123456' | Out-Null
+    Check "colore imposto a mano"           ((@(Get-STWorkspace | Where-Object { $_.Name -eq 'addws' })[0]).UiColor -eq '#123456')
+    # Il colore dell'area non deve sparire quando le si aggiungono altri tab.
+    Add-STWorkspaceTab -Name 'addws' -Tabs @(@{Title='nuovo'; Cwd=(Join-Path $root 'nuovo'); Command='& .\z'}) | Out-Null
+    Check "aggiungere tab non perde il colore" ((@(Get-STWorkspace | Where-Object { $_.Name -eq 'addws' })[0]).UiColor -eq '#123456')
+    Add-STWorkspaceTab -Name 'nata-ora' -Tabs @(@{Title='q'; Cwd=$root; Command='& .\q'}) | Out-Null
+    $nata = @(Get-STWorkspace | Where-Object { $_.Name -eq 'nata-ora' })[0]
+    Check "un'area nuova nasce colorata"    ([bool]$nata.UiColor)
+
+    Section "appartenenza dei tab vivi (per RICETTA, non identita')"
+    $aree = @(
+        [pscustomobject]@{ Name='alfa'; UiColor='#111111'; Tabs=@([pscustomobject]@{ Cwd='C:\x'; Shell='pwsh.exe';       Command='& tool' }) },
+        [pscustomobject]@{ Name='beta'; UiColor='#222222'; Tabs=@([pscustomobject]@{ Cwd='C:\y'; Shell='powershell.exe'; Command=$null   }) }
+    )
+    $vivi = @(
+        [pscustomobject]@{ Pid=1; Cwd='C:\x';  Command='& tool'; What='pwsh';   Shell='pwsh.exe';       Label='x [1]' }
+        [pscustomobject]@{ Pid=2; Cwd='C:\y';  Command=$null;    What='shell';  Shell='powershell.exe'; Label='y [2]' }
+        [pscustomobject]@{ Pid=3; Cwd='C:\z';  Command='& altro';What='shell';  Shell='powershell.exe'; Label='z [3]' }
+        [pscustomobject]@{ Pid=4; Cwd='C:\x';  Command='& tool'; What='ps';     Shell='powershell.exe'; Label='x-ps [4]' }
+    )
+    $m = @(Get-STLiveTabAreas -LiveTabs $vivi -Aree $aree)
+    Check "il tab in un'area la nomina"        (@($m[0].Aree) -contains 'alfa')
+    Check "e ne prende il colore"              ($m[0].AreaColor -eq '#111111')
+    Check "anche con comando assente"          (@($m[1].Aree) -contains 'beta' -and $m[1].AreaColor -eq '#222222')
+    Check "il tab estraneo non ha aree"        (@($m[2].Aree).Count -eq 0 -and -not $m[2].AreaColor)
+    # Con il ripiego sulla cartella (v. sezione sotto) una shell diversa NON e' piu'
+    # "estranea": la ricetta resta diversa, ma la cartella coincide e quindi il tab viene
+    # segnalato lo stesso, dichiarando il grado piu' debole. E' il comportamento voluto:
+    # meglio un avviso in piu' che un tab riaggiunto per sbaglio.
+    Check "shell diversa: non e' la stessa RICETTA" ($m[3].Certezza -ne 'ricetta')
+    Check "ma la cartella lo segnala comunque"      ($m[3].Certezza -eq 'cartella' -and @($m[3].Aree) -contains 'alfa')
+    Check "la certezza e' dichiarata 'ricetta'" ($m[0].Certezza -eq 'ricetta')
+    $dueAree = $aree + @([pscustomobject]@{ Name='gamma'; UiColor='#333333'; Tabs=@([pscustomobject]@{ Cwd='C:\x'; Shell='pwsh.exe'; Command='& tool' }) })
+    $m2 = @(Get-STLiveTabAreas -LiveTabs @($vivi[0]) -Aree $dueAree)
+    Check "un tab in due aree le elenca entrambe" (@($m2[0].Aree).Count -eq 2)
+
+    Section "ripiego sulla CARTELLA quando la ricetta non combacia"
+    # Il caso vero del 13/08: l'area `sistema` (giugno) ha i comandi con gli argomenti fra
+    # apici, i processi vivi no -> stesso comando, ricetta diversa, cinque tab su sei
+    # restavano spenti. Il ripiego guarda solo la cartella e DICHIARA di averlo fatto.
+    $vivi2 = @(
+        [pscustomobject]@{ Pid=9; Cwd='C:\x'; Command="& tool 'con-apici'"; What='pwsh'; Shell='pwsh.exe'; Label='x [9]' }
+        [pscustomobject]@{ Pid=8; Cwd='C:\estranea'; Command='& altro'; What='shell'; Shell='powershell.exe'; Label='e [8]' }
+    )
+    $m3 = @(Get-STLiveTabAreas -LiveTabs $vivi2 -Aree $aree)
+    Check "comando diverso, stessa cartella: riconosciuto" (@($m3[0].Aree) -contains 'alfa')
+    Check "e il grado dichiara 'cartella'"                 ($m3[0].Certezza -eq 'cartella')
+    Check "ne prende comunque il colore"                   ($m3[0].AreaColor -eq '#111111')
+    Check "cartella estranea: nessuna area"                (@($m3[1].Aree).Count -eq 0)
+    # QUESTA e' la sonda che mancava: prima il grado restava 'ricetta' anche senza
+    # riscontro, perche' @($hash['assente']) e' @($null) e Count valeva 1, quindi il
+    # ripiego non partiva mai. Il difetto passava inosservato perche' le prove
+    # guardavano solo che Aree fosse vuoto -- e lo era.
+    Check "senza riscontro il grado e' 'nessuna'"          ($m3[1].Certezza -eq 'nessuna')
+    Check "la ricetta esatta ha la precedenza"             (
+        (@(Get-STLiveTabAreas -LiveTabs @($vivi[0]) -Aree $aree)[0]).Certezza -eq 'ricetta')
+
+    Section "la riga della lista dice quanto ne sa (Get-STLiveRowSpec)"
+    $rEsatto = Get-STLiveRowSpec -Tab ([pscustomobject]@{ Label='x [1]'; Aree=@('alfa'); AreaColor='#111111'; Certezza='ricetta' })
+    $rDebole = Get-STLiveRowSpec -Tab ([pscustomobject]@{ Label='y [2]'; Aree=@('alfa'); AreaColor='#111111'; Certezza='cartella' })
+    $rNulla  = Get-STLiveRowSpec -Tab ([pscustomobject]@{ Label='z [3]'; Aree=@();       AreaColor=$null;    Certezza='nessuna' })
+    Check "ricetta: nomina l'area senza riserve"  ($rEsatto.Testo -match 'in: alfa$')
+    Check "cartella: lo DICHIARA nel testo"       ($rDebole.Testo -match 'stessa cartella')
+    Check "i due testi non sono uguali"           ($rEsatto.Testo -ne $rDebole.Testo)
+    Check "entrambi prendono il colore dell'area" ($rEsatto.Colore -eq '#111111' -and $rDebole.Colore -eq '#111111')
+    Check "senza aree: solo l'etichetta"          ($rNulla.Testo -eq 'z [3]' -and -not $rNulla.Colore)
+    $rDue = Get-STLiveRowSpec -Tab ([pscustomobject]@{ Label='w [4]'; Aree=@('alfa','beta'); AreaColor='#111111'; Certezza='ricetta' })
+    Check "due aree: le nomina entrambe"          ($rDue.Testo -match 'alfa, beta')
+
+    Section "il colore dell'area sopravvive a Save e New"
+    New-STWorkspace -Name 'ciclo' -Tabs @(@{ Title='a'; Cwd=$root; Command='& .\a' }) | Out-Null
+    Check "New: l'area nasce colorata"        ([bool](@(Get-STWorkspace | Where-Object { $_.Name -eq 'ciclo' })[0]).UiColor)
+    # Un colore FUORI tavolozza, apposta: se Save/New lo perdessero, il rimedio automatico
+    # ne assegnerebbe uno della tavolozza e la differenza si vedrebbe. Con un colore
+    # qualunque la prova passava anche perdendolo -- due mutanti sopravvissuti l'hanno
+    # detto, e la sonda non provava quello che dichiarava.
+    $col = '#FEDCBA'
+    Set-STWorkspaceColor -Name 'ciclo' -Color $col | Out-Null
+    New-STWorkspace -Name 'ciclo' -Tabs @(@{ Title='b'; Cwd=$root; Command='& .\b' }) | Out-Null
+    Check "New su area esistente: colore intatto" ((@(Get-STWorkspace | Where-Object { $_.Name -eq 'ciclo' })[0]).UiColor -eq $col)
+    Save-STWorkspace -Name 'ciclo' | Out-Null
+    Check "Save: colore intatto"              ((@(Get-STWorkspace | Where-Object { $_.Name -eq 'ciclo' })[0]).UiColor -eq $col)
+
+    Section "l'indice delle ricette distingue le maiuscole come Add"
+    $areeCase = @([pscustomobject]@{ Name='cs'; UiColor='#999999'; Tabs=@(
+        [pscustomobject]@{ Cwd='C:\k'; Shell='powershell.exe'; Command='& tool -Flag' }) })
+    $vivoCase = [pscustomobject]@{ Pid=7; Cwd='C:\k'; Command='& tool -flag'; What='ps'; Shell='powershell.exe'; Label='k [7]' }
+    $mc = @(Get-STLiveTabAreas -LiveTabs @($vivoCase) -Aree $areeCase)
+    Check "comando con case diverso: non e' la stessa ricetta" ($mc[0].Certezza -ne 'ricetta')
+
+    Section "cwd relativa: '..' non si divora fra loro"
+    Check "'..\..' resta due livelli"  (
+        (Get-STTabSignature @{Cwd='..\..'}) -cne (Get-STTabSignature @{Cwd='.'}))
+    Check "'..\..' diverso da '..'"    (
+        (Get-STTabSignature @{Cwd='..\..'}) -cne (Get-STTabSignature @{Cwd='..'}))
+    Check "'a\..' torna alla base"     (
+        (Get-STTabSignature @{Cwd='a\..'}) -ceq (Get-STTabSignature @{Cwd='.'}))
+    Check "'..\a' conserva il salto"   (
+        (Get-STTabSignature @{Cwd='..\a'}) -cne (Get-STTabSignature @{Cwd='a'}))
+
+    Section "mini-interfaccia (dialogo Aggiungi a gruppo)"
+    # Le prove del dialogo vivono nello script della UI, perche' li' ci sono i controlli
+    # WPF; ma se restano fuori dalla suite, un TUTTO VERDE qui non dice niente su meta'
+    # del lavoro. Quindi si lancia e se ne guarda l'esito (referto 13/08, rilievo 4).
+    $ui = Join-Path (Split-Path $PSScriptRoot -Parent) 'Show-STerminal.ps1'
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ui -TestAddDialog 2>&1 | Out-String
+    Check "le prove del dialogo passano" ($LASTEXITCODE -eq 0 -and $out -match 'TestAddDialog: TUTTO VERDE')
+    if ($out -notmatch 'TestAddDialog: TUTTO VERDE') {
+        ($out -split "`n" | Where-Object { $_ -match '\[FAIL\]' } | ForEach-Object { "      $($_.Trim())" })
+    }
+}
+catch {
+    # Senza questo, un'eccezione a meta' banco saltava tutti i controlli rimanenti e la
+    # riga finale stampava lo stesso TUTTO VERDE, uscendo con 0: la suite MENTIVA proprio
+    # quando si rompeva. Scoperto il 13/08 provando un mutante che non riusciva nemmeno a
+    # partire -- e il banco lo dichiarava verde.
+    $script:pass = $false
+    "  [FAIL] il banco si e' interrotto: $($_.Exception.Message)"
+    "         (a riga $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim()))"
 }
 finally {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
