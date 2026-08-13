@@ -339,6 +339,28 @@ try {
     Check "'..\a' conserva il salto"   (
         (Get-STTabSignature @{Cwd='..\a'}) -cne (Get-STTabSignature @{Cwd='a'}))
 
+    Section "drive-relative: C:..\x conserva il genitore"
+    # "C:\" e' una radice, "C:" no: e' la cartella corrente su quel drive, quindi il '..'
+    # sopra di essa e' reale e non si butta. Senza, C:..\x diventerebbe C:x.
+    Check "C:..\x non collassa in C:x"  (
+        (Get-STTabSignature @{Cwd='C:..\x'}) -cne (Get-STTabSignature @{Cwd='C:x'}))
+    Check "C:..\x diverso da C:\x"      (
+        (Get-STTabSignature @{Cwd='C:..\x'}) -cne (Get-STTabSignature @{Cwd='C:\x'}))
+    Check "C:\..\x resta sulla radice"  (
+        (Get-STTabSignature @{Cwd='C:\..\x'}) -ceq (Get-STTabSignature @{Cwd='C:\x'}))
+
+    Section "il colore dell'area si valida invece di scriverlo e basta"
+    $errori = 0
+    foreach ($brutto in @('#12345', 'rosso', '112233', '#GGHHII', '#1234567')) {
+        try { Set-STWorkspaceColor -Name 'ciclo' -Color $brutto | Out-Null } catch { $errori++ }
+    }
+    Check "cinque colori illeggibili, cinque rifiuti" ($errori -eq 5)
+    Check "il colore buono e' rimasto"  ((@(Get-STWorkspace | Where-Object { $_.Name -eq 'ciclo' })[0]).UiColor -eq '#FEDCBA')
+    $okAlpha = $true
+    try { Set-STWorkspaceColor -Name 'ciclo' -Color '#80FEDCBA' | Out-Null } catch { $okAlpha = $false }
+    Check "con canale alfa e' accettato" $okAlpha
+    Set-STWorkspaceColor -Name 'ciclo' -Color '#FEDCBA' | Out-Null
+
     Section "mini-interfaccia (dialogo Aggiungi a gruppo)"
     # Le prove del dialogo vivono nello script della UI, perche' li' ci sono i controlli
     # WPF; ma se restano fuori dalla suite, un TUTTO VERDE qui non dice niente su meta'

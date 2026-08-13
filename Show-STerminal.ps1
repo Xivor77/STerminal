@@ -238,12 +238,19 @@ function Update-WsList {
     }
 }
 function Update-LiveList {
+    # I tab si possono iniettare per poter provare il COLLEGAMENTO fra questa lista e
+    # Get-STLiveRowSpec: l'helper era stato estratto per renderlo provabile, ma nessuno
+    # verificava che la finestra lo USASSE -- un mutante che rompeva questo punto lasciava
+    # la suite verde su 101 controlli (referto 13/08, rilievo 3).
+    param([object[]]$Tabs)
     $liveList.Items.Clear()
     # I tab che stanno gia' in un'area si riconoscono dal COLORE DELL'AREA, cosi' non li
     # si riaggiunge per sbaglio. Il riconoscimento e' per RICETTA (cartella+shell+comando):
     # due tab gemelli aperti apposta sono indistinguibili, e per questo la riga lo dichiara
     # con "~" invece di affermare che e' proprio quel tab.
-    foreach ($t in @(Get-STLiveTabAreas | Sort-Object Cwd)) {
+    $elenco = if ($PSBoundParameters.ContainsKey('Tabs')) { @($Tabs) }
+              else { @(Get-STLiveTabAreas | Sort-Object Cwd) }
+    foreach ($t in $elenco) {
         $item = New-Object System.Windows.Controls.ListBoxItem
         $spec = Get-STLiveRowSpec -Tab $t
         $item.Content = $spec.Testo
@@ -323,6 +330,29 @@ if ($TestAddDialog) {
     $r = $d.Esito.Valore
     T "OK usa l'area scelta, non il testo"  ($r -and $r.Name -eq 'beta')
     T "la shell del tab vivo arriva nei tab" (@($r.Tabs)[0].Shell -eq 'pwsh.exe')
+
+    # --- il COLLEGAMENTO fra l'helper e la lista vera -------------------------------
+    # Non basta che Get-STLiveRowSpec sia giusta: la finestra deve usarla. Qui si popola
+    # la lista con tab finti e si confronta riga per riga con l'helper.
+    $finti = @(
+        [pscustomobject]@{ Label='a [1]'; Cwd='C:\a'; Aree=@('alfa'); AreaColor='#112233'; Certezza='ricetta'  }
+        [pscustomobject]@{ Label='b [2]'; Cwd='C:\b'; Aree=@('alfa'); AreaColor='#112233'; Certezza='cartella' }
+        [pscustomobject]@{ Label='c [3]'; Cwd='C:\c'; Aree=@();       AreaColor=$null;     Certezza='nessuna'  }
+    )
+    Update-LiveList -Tabs $finti
+    T "la lista mostra tutte le righe"   ($liveList.Items.Count -eq 3)
+    $tuttiUguali = $true
+    for ($k = 0; $k -lt $finti.Count; $k++) {
+        if ($liveList.Items[$k].Content -ne (Get-STLiveRowSpec -Tab $finti[$k]).Testo) { $tuttiUguali = $false }
+    }
+    T "ogni riga e' quella dell'helper"  $tuttiUguali
+    T "la riga per cartella lo dichiara" ($liveList.Items[1].Content -match 'stessa cartella')
+    T "il tab in area ha lo sfondo"      ($liveList.Items[0].Background -and
+                                          $liveList.Items[0].Background.Color.ToString() -match '112233')
+    # NON "-not Background": in WPF un elemento di lista ha uno sfondo predefinito, che
+    # non e' nullo. Quel che conta e' che non abbia il colore DELL'AREA.
+    T "il tab libero non ha quel colore" (-not ($liveList.Items[2].Background -and
+                                          $liveList.Items[2].Background.Color.ToString() -match '112233'))
 
     "`n=== TestAddDialog: $(if ($ok) { 'TUTTO VERDE' } else { 'CI SONO FAIL' }) ==="
     if (-not $ok) { exit 1 }

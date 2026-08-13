@@ -648,9 +648,14 @@ function Get-STTabSignature {
                 # Su percorso relativo l'ultimo segmento si toglie solo se non e' gia'
                 # un '..': altrimenti '..\..' si mangerebbe da solo e diventerebbe vuoto,
                 # cioe' due cartelle sopra si trasformerebbero in "qui".
-                if ($pila.Count -and ($prefisso -or $pila[$pila.Count-1] -ne '..')) {
+                # "Radice" vuol dire prefisso che FINISCE con la barra: solo sopra
+                # quella non si sale. "C:..\x" ha il drive ma non la barra, ed e' relativo
+                # alla cartella corrente di quel drive: li' il '..' va conservato, se no
+                # diventerebbe "C:x", che e' un'altra cartella (referto 13/08, rilievo 1).
+                $radice = $prefisso -and $prefisso.EndsWith('\')
+                if ($pila.Count -and ($radice -or $pila[$pila.Count-1] -ne '..')) {
                     $pila.RemoveAt($pila.Count - 1)
-                } elseif (-not $prefisso) { [void]$pila.Add('..') }
+                } elseif (-not $radice) { [void]$pila.Add('..') }
                 continue
             }
             [void]$pila.Add($seg)
@@ -690,6 +695,12 @@ function Set-STWorkspaceColor {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Name, [string]$Color)
 
+    # Un colore che WPF non sa convertire non fa rumore: la riga resta senza sfondo,
+    # perche' la finestra ha un catch che la salva. Il difetto sarebbe MUTO, quindi si
+    # rifiuta all'ingresso invece di finire nel file (referto 13/08, rilievo 2).
+    if ($Color -and $Color -notmatch '^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$') {
+        throw "colore non valido: '$Color'. Atteso #RRGGBB o #AARRGGBB."
+    }
     $dir = Get-STWorkspaceDir $Name
     $wj  = Join-Path $dir 'workspace.json'
     if (-not (Test-Path -LiteralPath $wj)) { throw "area '$Name' inesistente" }
