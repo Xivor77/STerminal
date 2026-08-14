@@ -294,8 +294,9 @@ $btnAdd.Add_Click({
     $status.Text = $t
 })
 
-Update-All
-
+# Le prove entrano PRIMA di Update-All: quella chiamata legge le aree vere e interroga i
+# processi vivi, e una prova che tocca il mondo reale non e' isolata -- anche quando non
+# scrive niente (referto 14/08, rilievo 1). Con lo switch, la finestra non si popola.
 if ($TestAddDialog) {
     # Prove del dialogo. Prima qui si stampava soltanto 'BUILT-OK', cioe' "si costruisce":
     # una risposta che non poteva fallire e che non diceva niente sul comportamento.
@@ -359,4 +360,5 @@ if ($TestAddDialog) {
     return
 }
 
+Update-All
 if (-not $NoShow) { [void]$win.ShowDialog() }
