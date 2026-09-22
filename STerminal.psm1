@@ -363,6 +363,16 @@ function Save-STWorkspace {
         [string]$Group   # se dato: cattura SOLO i tab etichettati con questo gruppo (Set-STerminalTab -Group)
     )
 
+    # La guardia sui nomi e' UNA SOLA (Test-STNomeArea) e sta PRIMA di tutto, perche'
+    # questa funzione CANCELLA la cartella e la riscrive: il permesso si legge prima
+    # del wipe, come UiColor, Intento/Fonte e il sidecar. Un no detto dopo avrebbe
+    # gia' distrutto l'area.
+    $motivoNome = Test-STNomeArea $Name
+    if ($motivoNome) {
+        Write-Warning "STerminal: salvataggio NON fatto: '$Name': $motivoNome."
+        return [pscustomobject]@{ Name = $Name; Rifiutata = $true; Motivo = $motivoNome }
+    }
+
     $slots = Get-STOpenSlots
     if ($Group) { $slots = @($slots | Where-Object { $_.Group -eq $Group }) }
     if (-not $slots) {

@@ -520,6 +520,30 @@ try {
     $gB = Add-STWorkspaceTab -Name 'v1.2' -Tabs @(@{ Title='x'; Cwd='C:\x'; Command='& x' })
     Check "nome nato altrove: Add- si ferma"            { ($gB.Rifiutata -and $gB.Motivo -match 'sembrare un file') }
 
+    Section "la quarta strada: Save- e la guardia PRIMA del wipe"
+    # Save-STWorkspace CANCELLA la cartella e la riscrive: se la guardia stesse dopo,
+    # un rifiuto avrebbe gia' distrutto l'area. Qui l'area col nome cattivo (il punto:
+    # legale come cartella, mai nata qui) ha workspace.json, sidecar e storico; dopo il
+    # no devono essere li' byte per byte.
+    $dirS = Join-Path $wsDir 'v9.9'; New-Item -ItemType Directory -Force -Path $dirS | Out-Null
+    (@{ Name='v9.9'; Created=(Get-Date).ToString('o'); UiColor='#123456'; Tabs=@(
+        @{ Title='s'; Cwd='C:\s'; Shell='powershell.exe'; Command='& s'; Intento='lavoro'; Fonte='persona'; Storico='tab-0.log' }
+    ) } | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $dirS 'workspace.json') -Encoding utf8
+    'sidecar finto' | Set-Content -LiteralPath (Join-Path $dirS 'terminale.json') -Encoding utf8
+    'storico finto' | Set-Content -LiteralPath (Join-Path $dirS 'tab-0.log') -Encoding utf8
+    $md5S = @{}
+    foreach ($f in (Get-ChildItem -LiteralPath $dirS -File)) { $md5S[$f.Name] = (Get-FileHash -LiteralPath $f.FullName -Algorithm MD5).Hash }
+    $gS = Save-STWorkspace -Name 'v9.9'
+    Check "Save- rifiuta: esito col motivo"             { ($gS.Rifiutata -and $gS.Motivo -eq (Test-STNomeArea 'v9.9')) }
+    Check "Save- rifiuta: la cartella c'e' ancora"      { (Test-Path -LiteralPath (Join-Path $dirS 'workspace.json')) }
+    $intatti = $true
+    foreach ($f in (Get-ChildItem -LiteralPath $dirS -File)) {
+        if ($md5S[$f.Name] -ne (Get-FileHash -LiteralPath $f.FullName -Algorithm MD5).Hash) { $intatti = $false }
+    }
+    Check "Save- rifiuta: contenuto byte-identico"      { $intatti }
+    # E i nomi buoni passano da Save- come prima: sono le prove 'rt' e 'soloA' in testa
+    # al banco, verdi oggi come ieri.
+
     Section "Get-STNameFromLaunch - F2: il venv senza punto (context-server)"
     # La funzione non e' esportata: si chiama nello scope del modulo, come fece il
     # manovale. La regola vale in tutte e due le direzioni: il caso vero deve parlare,
