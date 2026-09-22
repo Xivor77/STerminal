@@ -560,6 +560,13 @@ function Set-STWorkspaceTabTitle {
     $prima = [string]$tabs[$k].Title
     if ($tabs[$k].PSObject.Properties['Title']) { $tabs[$k].Title = $Title }
     else { $tabs[$k] | Add-Member -NotePropertyName Title -NotePropertyValue $Title }
+    # Frank, 23/09: dopo una rinomina a mano Fonte dice 'persona' -- il campo esiste per
+    # dire la provenienza, e se dopo un gesto umano dicesse ancora 'processo' sarebbe un
+    # atto falso. Il valore c'e' gia' (lo scrive la UI): NON se ne aggiunge un secondo.
+    # E' anche la radice dell'invariante della guardia D2b (:1591: "un Title scritto
+    # dalla persona non arriva mai con Fonte='processo'"): questo gesto la ripristina.
+    if ($tabs[$k].PSObject.Properties['Fonte']) { $tabs[$k].Fonte = 'persona' }
+    else { $tabs[$k] | Add-Member -NotePropertyName Fonte -NotePropertyValue 'persona' }
     # Si riscrive il FILE, non la cartella: Storico, terminale.json e le altre righe
     # non sopravvivono perche' preservate -- non vengono toccate proprio.
     ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wj -Encoding utf8

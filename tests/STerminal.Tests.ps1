@@ -409,8 +409,11 @@ try {
     Check "rinomina per ricetta: fatta, riga 0"       { ($r1.Rinominata -and $r1.Riga -eq 0 -and $r1.Prima -eq 'uno') }
     $dopoJson = Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json
     Check "il Title e' cambiato"                       { ($dopoJson.Tabs[0].Title -eq 'docker') }
+    # Frank, 23/09: l'osservabile del 3o e' aggiornato -- cambia il Title E Fonte
+    # ('persona'), e nient'altro. Sui rifiuti il file resta intatto, come prima.
+    Check "Fonte diventa 'persona' sulla riga"         { ($dopoJson.Tabs[0].Fonte -eq 'persona') }
     Check "le altre righe identiche"                   { ((($dopoJson.Tabs[1] | ConvertTo-Json -Depth 6 -Compress) -eq ($primaJson.Tabs[1] | ConvertTo-Json -Depth 6 -Compress)) -and (($dopoJson.Tabs[2] | ConvertTo-Json -Depth 6 -Compress) -eq ($primaJson.Tabs[2] | ConvertTo-Json -Depth 6 -Compress))) }
-    Check "Intento/Fonte/Storico della riga identici"  { ($dopoJson.Tabs[0].Intento -eq 'i1' -and $dopoJson.Tabs[0].Fonte -eq 'lancio' -and $dopoJson.Tabs[0].Storico -eq 'tab-0.log' -and $dopoJson.Tabs[0].Command -eq '& uno' -and $dopoJson.Tabs[0].Color -eq '#1FAA55') }
+    Check "Intento/Storico della riga identici"        { ($dopoJson.Tabs[0].Intento -eq 'i1' -and $dopoJson.Tabs[0].Storico -eq 'tab-0.log' -and $dopoJson.Tabs[0].Command -eq '& uno' -and $dopoJson.Tabs[0].Color -eq '#1FAA55') }
     Check "UiColor identico"                           { ($dopoJson.UiColor -eq '#112233') }
     Check "sidecar byte-identico"                      { ((Get-FileHash -LiteralPath (Join-Path $rnDir 'terminale.json') -Algorithm MD5).Hash -eq $sidePrima) }
     Check "storico intatto"                            { ((Get-Content -LiteralPath (Join-Path $rnDir 'tab-0.log') -Raw) -match 'contenuto storico') }
@@ -426,6 +429,7 @@ try {
     $r5 = Set-STWorkspaceTabTitle -Name 'rn' -Title 'claude' -TitleVecchio 'cmd' -Cwd 'C:\b'
     Check "TitleVecchio + ricetta: una riga sola"      { ($r5.Rinominata -and $r5.Riga -eq 1) }
     Check "TitleVecchio: file aggiornato"              { ((Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json).Tabs[1].Title -eq 'claude') }
+    Check "Fonte='persona' anche da 'processo'"        { ((Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json).Tabs[1].Fonte -eq 'persona') }
 
     Section "mini-interfaccia (dialogo Aggiungi a gruppo)"
     # Le prove del dialogo vivono nello script della UI, perche' li' ci sono i controlli
