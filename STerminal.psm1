@@ -330,6 +330,29 @@ function Get-STWorkspace {
     }
 }
 
+# Intento e Fonte sono campi della RICETTA: li scrive Add (dalla cattura viva), ma non
+# li conosce chi riscrive l'area da un'altra porta (Save dai vivi, New da definizione).
+# Stessa lezione del colore dell'area: si leggono PRIMA che la cartella venga cancellata,
+# e la riga nuova eredita quelli della riga vecchia con la STESSA ricetta (firma a tre
+# parti). Solo se combacia UNA riga sola: due righe vecchie con la stessa ricetta e
+# intenti diversi renderebbero l'eredita' un indovinello, e un intento indovinato e'
+# peggio di uno perso. Se nessuna riga vecchia combacia i campi restano vuoti, che e' la
+# risposta onesta: "questa ricetta non l'ha mai raccontata nessuno".
+function Get-STCampiRicettaPrecedenti {
+    param([object[]]$TabPrec, [object]$Tab)
+    if (-not $TabPrec) { return $null }
+    $firma = Get-STTabSignature $Tab -SenzaIntento
+    $candidati = @($TabPrec | Where-Object {
+        $_ -and (Get-STTabSignature $_ -SenzaIntento) -eq $firma
+    })
+    if ($candidati.Count -ne 1) { return $null }
+    $c = $candidati[0]
+    $intento = if ($c.PSObject.Properties['Intento']) { $c.Intento } else { $null }
+    $fonte   = if ($c.PSObject.Properties['Fonte'])   { $c.Fonte }   else { $null }
+    if ($null -eq $intento -and $null -eq $fonte) { return $null }
+    [pscustomobject]@{ Intento = $intento; Fonte = $fonte }
+}
+
 # Salva i tab della finestra corrente come area di lavoro nominata.
 # NOTA: titolo/colore catturati sono quelli noti a STerminal (Set-STerminalTab); la shell
 # NON puo' leggere quelli impostati dalla UI di WT (click destro / doppio click).
@@ -354,10 +377,24 @@ function Save-STWorkspace {
     # ricreata da zero, quindi rileggerlo dopo significa leggere un file che non c'e' piu'.
     # (Ed era proprio il difetto: la sonda passava lo stesso, perche' il rimedio
     # automatico riassegnava un colore che nel test capitava identico.)
+    # E dal 22/09 non e' solo il colore: anche Intento/Fonte delle righe gia' salvate e
+    # il sidecar terminale.json stanno in quella cartella. Chi riscrive da un'altra porta
+    # non li conosce, ma non deve cancellarli (ticket dei tre scrittori): si portano
+    # dietro come il colore.
     $uiPrec = $null
+    $tabPrec = @()
     $wjPrec = Join-Path $dir 'workspace.json'
     if (Test-Path -LiteralPath $wjPrec) {
-        try { $uiPrec = (Get-Content -LiteralPath $wjPrec -Raw | ConvertFrom-Json).UiColor } catch { }
+        try {
+            $prec = Get-Content -LiteralPath $wjPrec -Raw | ConvertFrom-Json
+            $uiPrec = $prec.UiColor
+            $tabPrec = @($prec.Tabs)
+        } catch { }
+    }
+    $sidePrec = $null
+    $sidePath = Join-Path $dir 'terminale.json'
+    if (Test-Path -LiteralPath $sidePath) {
+        try { $sidePrec = [System.IO.File]::ReadAllBytes($sidePath) } catch { }
     }
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -368,12 +405,15 @@ function Save-STWorkspace {
         $storFile = "tab-$i.log"
         $body = Get-STScrollbackBody -Path (Join-Path (Get-STSlotDir $s.Slot) 'scrollback.log')
         if ($body) { Set-Content -LiteralPath (Join-Path $dir $storFile) -Value $body -Encoding utf8 }
+        $campiPrec = Get-STCampiRicettaPrecedenti -TabPrec $tabPrec -Tab $s
         $tabs.Add([pscustomobject]@{
             Title   = $s.Title
             Color   = $s.Color
             Cwd     = $s.Cwd
             Shell   = $s.Shell
             Command = $s.Command
+            Intento = if ($campiPrec) { $campiPrec.Intento } else { $null }
+            Fonte   = if ($campiPrec) { $campiPrec.Fonte } else { $null }
             Storico = $storFile
         })
         $i++
@@ -383,6 +423,7 @@ function Save-STWorkspace {
     # senza rileggerlo prima un salvataggio cancellerebbe quello che c'era.
     $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $tabs; UiColor = $uiPrec }
     ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wjPrec -Encoding utf8
+    if ($null -ne $sidePrec) { [System.IO.File]::WriteAllBytes($sidePath, $sidePrec) }
     if (-not $uiPrec) { [void](Set-STWorkspaceColor -Name $Name) }
     Write-Host "STerminal: area '$Name' salvata ($($tabs.Count) tab)." -ForegroundColor Green
 }
@@ -401,26 +442,53 @@ function New-STWorkspace {
     # ricreata da zero, quindi rileggerlo dopo significa leggere un file che non c'e' piu'.
     # (Ed era proprio il difetto: la sonda passava lo stesso, perche' il rimedio
     # automatico riassegnava un colore che nel test capitava identico.)
+    # E dal 22/09 non e' solo il colore: anche Intento/Fonte delle righe gia' salvate e
+    # il sidecar terminale.json stanno in quella cartella. Chi riscrive da un'altra porta
+    # non li conosce, ma non deve cancellarli (ticket dei tre scrittori): si portano
+    # dietro come il colore.
     $uiPrec = $null
+    $tabPrec = @()
     $wjPrec = Join-Path $dir 'workspace.json'
     if (Test-Path -LiteralPath $wjPrec) {
-        try { $uiPrec = (Get-Content -LiteralPath $wjPrec -Raw | ConvertFrom-Json).UiColor } catch { }
+        try {
+            $prec = Get-Content -LiteralPath $wjPrec -Raw | ConvertFrom-Json
+            $uiPrec = $prec.UiColor
+            $tabPrec = @($prec.Tabs)
+        } catch { }
+    }
+    $sidePrec = $null
+    $sidePath = Join-Path $dir 'terminale.json'
+    if (Test-Path -LiteralPath $sidePath) {
+        try { $sidePrec = [System.IO.File]::ReadAllBytes($sidePath) } catch { }
     }
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $list = [System.Collections.Generic.List[object]]::new()
     foreach ($t in $Tabs) {
+        $shellT = if ($t.Shell) { $t.Shell } else { 'powershell.exe' }
+        $intentoDato = if ($t -is [System.Collections.IDictionary]) { if ($t.Contains('Intento')) { $t['Intento'] } else { $null } }
+                       elseif ($t.PSObject.Properties['Intento']) { $t.Intento } else { $null }
+        $fonteData = if ($t -is [System.Collections.IDictionary]) { if ($t.Contains('Fonte')) { $t['Fonte'] } else { $null } }
+                     elseif ($t.PSObject.Properties['Fonte']) { $t.Fonte } else { $null }
+        # La firma si calcola sulla shell EFFETTIVA: una definizione senza Shell vale
+        # 'powershell.exe', e deve combaciare con la riga vecchia scritta cosi'.
+        $campiPrec = Get-STCampiRicettaPrecedenti -TabPrec $tabPrec -Tab ([pscustomobject]@{ Cwd = $t.Cwd; Shell = $shellT; Command = $t.Command })
         $list.Add([pscustomobject]@{
             Title   = $t.Title
             Color   = $t.Color
             Cwd     = $t.Cwd
-            Shell   = if ($t.Shell) { $t.Shell } else { 'powershell.exe' }
+            Shell   = $shellT
             Command = $t.Command
+            # Il chiamante puo' definire Intento/Fonte lui stesso; se tace, la riga
+            # eredita quelli della riga vecchia con la stessa ricetta (come Save).
+            Intento = if ($null -ne $intentoDato) { $intentoDato } elseif ($campiPrec) { $campiPrec.Intento } else { $null }
+            Fonte   = if ($null -ne $fonteData) { $fonteData } elseif ($campiPrec) { $campiPrec.Fonte } else { $null }
             Storico = $null
         })
     }
     $ws = [pscustomobject]@{ Name = $Name; Created = (Get-Date).ToString('o'); Tabs = $list; UiColor = $uiPrec }
     ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wjPrec -Encoding utf8
+    if ($null -ne $sidePrec) { [System.IO.File]::WriteAllBytes($sidePath, $sidePrec) }
     if (-not $uiPrec) { [void](Set-STWorkspaceColor -Name $Name) }
     Write-Host "STerminal: area '$Name' definita ($($list.Count) tab)." -ForegroundColor Green
 }
