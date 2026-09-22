@@ -171,6 +171,143 @@ function Invoke-STAddDialog {
     return $esito.Valore
 }
 
+# --- Applicazione dei cambi-titolo (tasto Modifica, colonna sinistra) ----------
+# Fra la LETTURA del file e la SCRITTURA il file puo' cambiare (tre funzioni
+# riscrivono workspace.json per intero). Quindi la riga si indirizza con i valori
+# CATTURATI ALLA LETTURA (-TitleVecchio + -Cwd, piu' shell/comando quando ci sono):
+# se quella riga non c'e' piu' o non e' piu' unica, il motore RIFIUTA invece di
+# scrivere sulla riga sbagliata. MAI -Index: e' l'unico indirizzo con cui il motore
+# non puo' rifiutare. E ogni rifiuto torna nel testo: un no ingoiato farebbe credere
+# alla persona di aver rinominato.
+function Invoke-STTabRenameApply {
+    param([Parameter(Mandatory)][string]$Name, [object[]]$Cambi)
+    $esiti = @()
+    if (-not $Cambi -or $Cambi.Count -eq 0) {
+        return @([pscustomobject]@{ Esito='nessuna'; Prima=$null; Dopo=$null; Motivo=$null
+            Riga="Nessuna modifica: i titoli sono quelli salvati." })
+    }
+    foreach ($c in $Cambi) {
+        $params = @{ Name = $Name; Title = $c.NuovoTitolo; TitleVecchio = $c.TitleVecchio; Cwd = [string]$c.Cwd }
+        if ($c.Shell)   { $params.Shell   = [string]$c.Shell }
+        if ($c.Command) { $params.Command = [string]$c.Command }
+        $res = Set-STWorkspaceTabTitle @params
+        if ($res.Rinominata) {
+            $esiti += [pscustomobject]@{ Esito='rinominata'; Prima=$res.Prima; Dopo=$res.Dopo; Motivo=$null
+                Riga="'$($res.Prima)' -> '$($res.Dopo)'   ($($c.Cwd))   [Fonte=persona]" }
+        } else {
+            $esiti += [pscustomobject]@{ Esito='rifiutata'; Prima=$c.TitleVecchio; Dopo=$c.NuovoTitolo; Motivo=$res.Motivo
+                Riga="NON fatta: '$($c.TitleVecchio)'   ($($c.Cwd)):  $($res.Motivo)" }
+        }
+    }
+    $esiti
+}
+
+# --- Dialogo "Modifica": i titoli delle righe SALVATE di un'area ---------------
+# Qui NON c'e' il ponte col tab vivo (quello e' il ritirato della colonna destra):
+# si lavora direttamente sulle righe del file. Il dialogo lo dichiara, e dichiara
+# anche che sullo schermo non succede niente finche' non si fa Riprendi.
+function Invoke-STEditTabsDialog {
+    param([Parameter(Mandatory)][string]$Name, [switch]$NoShow)
+    [xml]$dx = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Modifica" Height="460" Width="620" WindowStartupLocation="CenterOwner">
+  <Grid Margin="12">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <StackPanel Grid.Row="0" Margin="0,0,0,8">
+      <TextBlock x:Name="Hdr" FontWeight="Bold" TextWrapping="Wrap"/>
+      <TextBlock x:Name="Warn" Foreground="#8A6D00" TextWrapping="Wrap" Margin="0,4,0,0"
+                 Text="Rinominare cambia la riga salvata, non il tab vivo: sullo schermo non succede niente finche&#39; non fai Riprendi."/>
+    </StackPanel>
+    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+      <StackPanel x:Name="RowsPanel"/>
+    </ScrollViewer>
+    <TextBlock x:Name="Results" Grid.Row="2" Foreground="Gray" TextWrapping="Wrap" Margin="0,8,0,0"/>
+    <WrapPanel Grid.Row="4" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button x:Name="Applica" Content="Applica" Width="90" Height="30" Margin="0,0,8,0"/>
+      <Button x:Name="Chiudi" Content="Chiudi" Width="90" Height="30" IsCancel="True"/>
+    </WrapPanel>
+  </Grid>
+</Window>
+"@
+    $dlg      = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dx))
+    $hdr      = $dlg.FindName('Hdr')
+    $panel    = $dlg.FindName('RowsPanel')
+    $results  = $dlg.FindName('Results')
+    $btnApplica = $dlg.FindName('Applica')
+    $btnChiudi  = $dlg.FindName('Chiudi')
+    $hdr.Text = "Righe salvate dell'area '$Name'  (i titoli si cambiano qui)"
+
+    # LETTURA: i valori che indirizzeranno la scrittura si catturano ORA, non al click.
+    $righeUi = @()
+    $wj = Join-Path (Get-STWorkspaceDir $Name) 'workspace.json'
+    $rows = @()
+    if (Test-Path -LiteralPath $wj) {
+        try { $rows = @((Get-Content -LiteralPath $wj -Raw | ConvertFrom-Json).Tabs) } catch { $rows = @() }
+    }
+    if (-not (Test-Path -LiteralPath $wj)) {
+        $results.Text = "L'area '$Name' non ha un workspace.json: niente da rinominare."
+    } elseif ($rows.Count -eq 0) {
+        $results.Text = "L'area '$Name' non ha righe: niente da rinominare."
+    } else {
+        foreach ($row in $rows) {
+            $tb = New-Object System.Windows.Controls.TextBlock
+            $tb.FontSize = 11; $tb.Foreground = [System.Windows.Media.Brushes]::Gray
+            $pezzi = @([string]$row.Cwd)
+            if ($row.Shell)   { $pezzi += [string]$row.Shell }
+            if ($row.Command) { $pezzi += [string]$row.Command }
+            $tb.Text = [string]::Join('  |  ', $pezzi)
+            $box = New-Object System.Windows.Controls.TextBox
+            $box.Width = 420; $box.HorizontalAlignment = 'Left'; $box.Margin = '0,2,0,8'
+            $box.Text = [string]$row.Title
+            [void]$panel.Children.Add($tb)
+            [void]$panel.Children.Add($box)
+            $righeUi += @{ Box=$box; Title=[string]$row.Title; Cwd=[string]$row.Cwd
+                           Shell=[string]$row.Shell; Command=[string]$row.Command }
+        }
+    }
+
+    $esito = @{ Valore = $null }
+    $btnApplica.Add_Click(({
+        $cambi = @()
+        foreach ($r in $righeUi) {
+            $nuovo = $r.Box.Text.Trim()
+            if ($nuovo -ne $r.Title) {
+                $cambi += @{ TitleVecchio=$r.Title; NuovoTitolo=$nuovo; Cwd=$r.Cwd; Shell=$r.Shell; Command=$r.Command }
+            }
+        }
+        $esiti = @(Invoke-STTabRenameApply -Name $Name -Cambi $cambi)
+        $results.Text = [string]::Join([Environment]::NewLine, @($esiti | ForEach-Object Riga))
+        # Dopo un SI' la riga salvata ha il titolo nuovo: il prossimo Applica deve
+        # indirizzare QUELLO, non il fantasma del vecchio. Dopo un NO resta il vecchio.
+        $okN = 0; $noN = 0
+        foreach ($e in $esiti) {
+            if ($e.Esito -eq 'rinominata') {
+                $okN++
+                foreach ($r in $righeUi) { if ($r.Title -eq $e.Prima -and $r.Box.Text.Trim() -eq $e.Dopo) { $r.Title = $e.Dopo } }
+            } elseif ($e.Esito -eq 'rifiutata') { $noN++ }
+        }
+        $esito.Valore = @{ Rinominate=$okN; Rifiutate=$noN }
+    }).GetNewClosure())
+    $btnChiudi.Add_Click({ $dlg.DialogResult = $false; $dlg.Close() }.GetNewClosure())
+
+    if ($NoShow) {
+        return [pscustomobject]@{
+            Costruito = $true; Righe = $righeUi; Results = $results
+            Applica = $btnApplica; Chiudi = $btnChiudi; Esito = $esito; Warn = $dlg.FindName('Warn')
+        }
+    }
+    try { $dlg.Owner = $win } catch { }
+    [void]$dlg.ShowDialog()
+    return $esito.Valore
+}
+
 # --- Finestra principale -----------------------------------------------------
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -199,7 +336,8 @@ function Invoke-STAddDialog {
         <WrapPanel Grid.Row="2" Margin="0,8,0,0">
           <Button x:Name="BtnResume" Content="Riprendi" Width="100" Height="30" Margin="0,0,6,0"/>
           <Button x:Name="BtnDelete" Content="Elimina"  Width="90"  Height="30" Margin="0,0,6,0"/>
-          <Button x:Name="BtnRefresh" Content="Aggiorna" Width="90" Height="30"/>
+          <Button x:Name="BtnRefresh" Content="Aggiorna" Width="90" Height="30" Margin="0,0,6,0"/>
+          <Button x:Name="BtnEditTabs" Content="Modifica..." Width="100" Height="30"/>
         </WrapPanel>
       </Grid>
 
@@ -231,6 +369,7 @@ $liveList   = $win.FindName('LiveList')
 $btnResume  = $win.FindName('BtnResume')
 $btnDelete  = $win.FindName('BtnDelete')
 $btnRefresh = $win.FindName('BtnRefresh')
+$btnEdit    = $win.FindName('BtnEditTabs')
 $btnAdd     = $win.FindName('BtnAddGroup')
 $status     = $win.FindName('Status')
 
@@ -321,6 +460,21 @@ $btnAdd.Add_Click({
     $status.Text = $t
 })
 
+# Precedente vero della casa: tasto sempre acceso, e il click a vuoto ti dice cosa manca.
+$btnEdit.Add_Click({
+    if (-not $wsList.SelectedItem) { $status.Text = "Seleziona prima un'area (a sinistra)."; return }
+    $n = $wsList.SelectedItem.Tag
+    $esito = Invoke-STEditTabsDialog -Name $n
+    # Si dice cosa e' successo, non cosa era stato chiesto. Il dettaglio per riga e'
+    # rimasto nel dialogo; qui il riassunto, compresi i NO del motore.
+    if ($esito) {
+        $t = "Modifica '$n': $($esito.Rinominate) rinominate"
+        if ($esito.Rifiutate) { $t += ", $($esito.Rifiutate) NON fatte (il perche' era nel dialogo)" }
+        $t += ". Il tab vivo non cambia finche' non fai Riprendi."
+        $status.Text = $t
+    }
+})
+
 # Le prove entrano PRIMA di Update-All: quella chiamata legge le aree vere e interroga i
 # processi vivi, e una prova che tocca il mondo reale non e' isolata -- anche quando non
 # scrive niente (referto 14/08, rilievo 1). Con lo switch, la finestra non si popola.
@@ -381,6 +535,78 @@ if ($TestAddDialog) {
     # non e' nullo. Quel che conta e' che non abbia il colore DELL'AREA.
     T "il tab libero non ha quel colore" (-not ($liveList.Items[2].Background -and
                                           $liveList.Items[2].Background.Color.ToString() -match '112233'))
+
+    # --- Modifica (colonna sinistra): i titoli delle righe SALVATE --------------
+    # Il dialogo legge il file, la persona modifica, il dialogo scrive: qui si prova
+    # tutta la catena, compreso il caso in cui il file cambia FRA lettura e scrittura.
+    $tmpWs2 = Join-Path $env:TEMP ('st_ui_ed_' + [guid]::NewGuid().ToString('n').Substring(0,8))
+    & (Get-Module STerminal) { param($w) $script:STWorkspaces = $w } $tmpWs2
+    New-STWorkspace -Name 'ed' -Tabs @(
+        @{ Title='uno'; Cwd='C:\x1'; Shell='powershell.exe'; Command='& uno' },
+        @{ Title='due'; Cwd='C:\x2'; Shell='pwsh.exe';       Command='& due' },
+        @{ Title='';    Cwd='C:\x3'; Shell='powershell.exe'; Command='& tre' }
+    ) | Out-Null
+    New-STWorkspace -Name 'edtwin' -Tabs @(
+        @{ Title='g'; Cwd='C:\g'; Shell='powershell.exe'; Command='& g' },
+        @{ Title='g'; Cwd='C:\g'; Shell='powershell.exe'; Command='& g' }
+    ) | Out-Null
+    $wjEd = Join-Path (Join-Path $tmpWs2 'ed') 'workspace.json'
+
+    $e1 = Invoke-STEditTabsDialog -Name 'ed' -NoShow
+    T "Modifica: il dialogo si costruisce"     ($e1.Costruito -eq $true)
+    T "una casella per riga salvata"           ($e1.Righe.Count -eq 3)
+    T "prefill coi titoli salvati"             ($e1.Righe[0].Box.Text -eq 'uno' -and $e1.Righe[2].Box.Text -eq '')
+    T "l'avviso Riprendi c'e'"                 ($e1.Warn.Text -match 'Riprendi')
+
+    # IL SI': un titolo cambia, e solo quello
+    $md5Prima = (Get-FileHash -LiteralPath (Join-Path (Join-Path $tmpWs2 'edtwin') 'workspace.json') -Algorithm MD5).Hash
+    $e1.Righe[0].Box.Text = 'docker'
+    $e1.Applica.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) 2>$null
+    $salvato = Get-Content -LiteralPath $wjEd -Raw | ConvertFrom-Json
+    T "il si' scrive il titolo nuovo"          ($salvato.Tabs[0].Title -eq 'docker')
+    T "e lo marca Fonte=persona"               ($salvato.Tabs[0].Fonte -eq 'persona')
+    T "senza toccare il resto della riga"      ($salvato.Tabs[0].Command -eq '& uno' -and $salvato.Tabs[0].Cwd -eq 'C:\x1')
+    T "ne' le altre righe"                     ($salvato.Tabs[1].Title -eq 'due' -and $salvato.Tabs[2].Title -eq '')
+    T "l'esito lo conta"                       ($e1.Esito.Valore.Rinominate -eq 1 -and $e1.Esito.Valore.Rifiutate -eq 0)
+    T "e lo mostra nel dialogo"                ($e1.Results.Text -match "'uno' -> 'docker'")
+
+    # Dopo un si', la riga si ri-indirizza col titolo NUOVO (niente fantasmi)
+    $e1.Righe[0].Box.Text = 'docker2'
+    $e1.Applica.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) 2>$null
+    $salvato = Get-Content -LiteralPath $wjEd -Raw | ConvertFrom-Json
+    T "secondo si' sulla stessa riga"          ($salvato.Tabs[0].Title -eq 'docker2')
+
+    # Applica senza cambi: nessuna scrittura, e lo dice
+    $md5Ed = (Get-FileHash -LiteralPath $wjEd -Algorithm MD5).Hash
+    $e1.Applica.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) 2>$null
+    T "senza cambi non scrive"                 ((Get-FileHash -LiteralPath $wjEd -Algorithm MD5).Hash -eq $md5Ed)
+    T "e lo dice"                              ($e1.Results.Text -match 'Nessuna modifica')
+
+    # IL NO: il gemello -- il motore rifiuta e il rifiuto si VEDE
+    $e2 = Invoke-STEditTabsDialog -Name 'edtwin' -NoShow
+    $e2.Righe[0].Box.Text = 'x'
+    $e2.Applica.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) 2>$null
+    $gem = Get-Content -LiteralPath (Join-Path (Join-Path $tmpWs2 'edtwin') 'workspace.json') -Raw | ConvertFrom-Json
+    T "il gemello non viene toccato"           ($gem.Tabs[0].Title -eq 'g' -and $gem.Tabs[1].Title -eq 'g')
+    T "file dei gemelli byte-identico"         ((Get-FileHash -LiteralPath (Join-Path (Join-Path $tmpWs2 'edtwin') 'workspace.json') -Algorithm MD5).Hash -eq $md5Prima)
+    T "il rifiuto arriva agli occhi"           ($e2.Results.Text -match 'NON fatta' -and $e2.Results.Text -match '2 righe')
+
+    # IL FILE CAMBIATO SOTTO: lettura, poi il file perde la riga, poi scrittura.
+    # L'indirizzo catturato alla lettura non trova piu' la riga: il motore dice no.
+    $e3 = Invoke-STEditTabsDialog -Name 'ed' -NoShow
+    $e3.Righe[1].Box.Text = 'sparito'
+    $resto = Get-Content -LiteralPath $wjEd -Raw | ConvertFrom-Json
+    @{ Tabs = @($resto.Tabs | Where-Object { $_.Cwd -ne 'C:\x2' }) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $wjEd -Encoding utf8
+    $e3.Applica.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) 2>$null
+    T "file cambiato sotto: il no si vede"     ($e3.Results.Text -match 'NON fatta' -and $e3.Results.Text -match 'nessuna riga')
+    $dopo = Get-Content -LiteralPath $wjEd -Raw | ConvertFrom-Json
+    T "e nessuna riga e' stata riscritta"      (@($dopo.Tabs).Count -eq 2 -and -not @($dopo.Tabs | Where-Object { $_.Title -eq 'sparito' }))
+
+    # Area senza righe: detto, non spento in silenzio
+    $dirV = Join-Path $tmpWs2 'edvuota'; New-Item -ItemType Directory -Force -Path $dirV | Out-Null
+    '{"Tabs": []}' | Set-Content -LiteralPath (Join-Path $dirV 'workspace.json') -Encoding utf8
+    $e4 = Invoke-STEditTabsDialog -Name 'edvuota' -NoShow
+    T "area vuota: lo dice"                    ($e4.Results.Text -match 'non ha righe')
 
     "`n=== TestAddDialog: $(if ($ok) { 'TUTTO VERDE' } else { 'CI SONO FAIL' }) ==="
     if (-not $ok) { exit 1 }
