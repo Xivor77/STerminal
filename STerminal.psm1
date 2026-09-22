@@ -1041,7 +1041,7 @@ questo qui non si scende di un livello: si legge meglio il nodo di sempre.
 Forme riconosciute, tutte misurate sulle 21 schede vive del 18/09
 (DISEGNO-livetab-2026-09-18 sez.3):
   F1  cmd.exe  -> il primo token che finisce in .cmd/.bat/.ps1
-  F2  python   -> la cartella che contiene .venv, altrimenti il primo argomento .py
+  F2  python   -> la cartella che contiene .venv/venv, altrimenti il primo argomento .py
   F3  node     -> il primo .js/.mjs FUORI da node_modules
   F4  il resto -> $null, e chi chiama tiene il nome dell'exe (comportamento di oggi)
 
@@ -1080,7 +1080,14 @@ if ($Exe -imatch '^(python|python3|py)\.exe$') {
     # F2. La cartella del .venv batte il nome dello script: chatbot, FrankByMail e
     # comfyui lanciano tutti e tre un 'main.py', e chiamarle tutte 'main' sarebbe
     # PEGGIO di 'python' -- tre schede ambigue con un nome nuovo (sez.4, caso 3).
-    if ($primo -imatch '^(.*)[\\/]\.venv[\\/]') { return (Foglia $Matches[1]) }
+    # 23/09: il punto non e' piu' obbligatorio -- 'venv' e '.venv' sono la stessa
+    # convenzione, e il nome del progetto resta OSSERVATO nella riga di lancio (la
+    # cartella che contiene il venv), non inferito e non letto dal disco. La regola
+    # era tarata sulle 21 schede del 18/09 e il venv senza punto non c'era (il caso
+    # vero: context-server): urna che non conteneva il caso, non regola scritta male.
+    # Resta FUORI il ripiego su '-m <modulo>': 'uvicorn' uguale per ogni progetto
+    # lanciato cosi' sarebbe la trappola dei tre 'main' di cui sopra.
+    if ($primo -imatch '^(.*)[\\/]\.?venv[\\/]') { return (Foglia $Matches[1]) }
     $s = @($pezzi | Where-Object { $_ -imatch '\.py$' })[0]
     if ($s) { return (Foglia $s) }
     return $null

@@ -431,6 +431,22 @@ try {
     Check "TitleVecchio: file aggiornato"              { ((Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json).Tabs[1].Title -eq 'claude') }
     Check "Fonte='persona' anche da 'processo'"        { ((Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json).Tabs[1].Fonte -eq 'persona') }
 
+    Section "Get-STNameFromLaunch - F2: il venv senza punto (context-server)"
+    # La funzione non e' esportata: si chiama nello scope del modulo, come fece il
+    # manovale. La regola vale in tutte e due le direzioni: il caso vero deve parlare,
+    # e le forme che tacciono giustamente devono restare mute -- una regola allargata
+    # che dice di si' a tutto non ha imparato niente.
+    $nfl = { param($r,$e) & (Get-Module STerminal) { param($rr,$ee) Get-STNameFromLaunch -Riga $rr -Exe $ee } $r $e }
+    $rigaVera = '"C:\projects\context-server\venv\Scripts\python.exe" -m uvicorn context_server.main:app --host 0.0.0.0 --port 8420 --timeout-graceful-shutdown 30'
+    Check "venv senza punto: il nome del progetto esce"  { ((& $nfl $rigaVera 'python.exe') -eq 'context-server') }
+    Check ".venv col punto: invariato, batte main.py"    { ((& $nfl '"C:\x\chatbot\.venv\Scripts\python.exe" main.py' 'python.exe') -eq 'chatbot') }
+    Check "venv annidato: la foglia e' il progetto"      { ((& $nfl '"C:\a\progetto\venv\Scripts\python.exe" -m qualcosa' 'python.exe') -eq 'progetto') }
+    Check "'venvetta' non e' un venv: ripiego sul .py"   { ((& $nfl '"C:\venvetta\python.exe" .\script.py' 'python.exe') -eq 'script') }
+    Check "python di sistema con -m: resta MUTO"         { ($null -eq (& $nfl '"C:\Python312\python.exe" -m pip install' 'python.exe')) }
+    Check "-m uvicorn senza venv nel path: resta MUTO"   { ($null -eq (& $nfl '"C:\Python312\python.exe" -m uvicorn app:main' 'python.exe')) }
+    Check "npm-cli in node_modules: resta MUTO"          { ($null -eq (& $nfl 'node "C:\x\node_modules\npm\bin\npm-cli.js" install' 'node.exe')) }
+    Check "nessuna forma python: resta MUTO"             { ($null -eq (& $nfl '"C:\Python312\python.exe"' 'python.exe')) }
+
     Section "mini-interfaccia (dialogo Aggiungi a gruppo)"
     # Le prove del dialogo vivono nello script della UI, perche' li' ci sono i controlli
     # WPF; ma se restano fuori dalla suite, un TUTTO VERDE qui non dice niente su meta'
