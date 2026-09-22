@@ -4,3 +4,22 @@ desktop.ini
 *.user
 
 # Lo stato runtime vive in ~/.sterminal (fuori dal repo), non qui.
+
+# Backup di lavoro col checksum: artefatti di cantiere, mai destinati al repo (22/09).
+*.bak-*
+
+# Verbali di cantiere: restano fuori dal repo pubblico (decisione di Vittorio, 22/09).
+# Portano percorsi personali e nomi interni, e la storia di git li terrebbe anche
+# cancellandoli dopo: la porta si chiude qui, non spostando i file.
+tests/DISEGNO-livetab-2026-09-18.md
+tests/MISURA-banchi-2026-09-18.md
+tests/MISURA-lanciatori-2026-08-30.md
+tests/PROVA-regole-fermata-2026-08-30.md
+tests/REFERTO-riparazione-livetab-2026-09-18.md
+
+# PROVVISORIO (22/09): questi due SONO codice - una sonda e un banco - e dovrebbero
+# viaggiare col progetto. Restano fuori solo perche' portano occorrenze di percorsi
+# personali / nomi interni non ancora guardate una per una. Il rientro e' un lavoro
+# suo: ripulire le occorrenze, poi togliere queste due righe.
+tests/PROVA-lettura-nome-2026-09-01.ps1
+tests/sonda-canary.ps1
