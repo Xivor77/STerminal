@@ -288,6 +288,36 @@ function Get-STerminalStatus {
 
 #region aree di lavoro (workspaces)
 
+# Un meta valutato contro il suo processo: lo slot se e' vivo, $null se e' morto.
+# "Questo slot e' morto" e "non ho potuto guardare" NON sono la stessa risposta: su un
+# processo protetto StartTime non lancia - torna $null (misurato 22/09: atieclxx.exe,
+# WmiApSrv.exe). Il flag "non e' scattata un'eccezione" registrava quindi "ho guardato"
+# quando voleva dire "non mi e' stato negato", e il $null finiva nel [datetime]$ProcStart
+# di Get-STSlotForPid: errore di trasformazione che abbatteva TUTTA la pipeline - non
+# solo il meta malato, anche gli slot sani non arrivavano, e Save-STWorkspace salvava
+# il vuoto. Senza orologio si valuta con la guardia che resta (il nome), che e' la
+# strada che Get-STSlotForPid prevede gia': non una scorciatoia nuova. E un meta che
+# non si puo' valutare non deve mai far saltare la chiamata intera.
+function Get-STSlotSeVivo {
+    # Niente Mandatory su Meta: Read-STMeta puo' rispondere $null e il binding di un
+    # parametro obbligatorio lancerebbe - il dato cattivo deve essere scartato, non
+    # abbattere la pipeline (e' il difetto che questa funzione toglie).
+    param(
+        [object]$Meta,
+        [object]$Processo   # per le prove: un processo gia' letto (o finto)
+    )
+    if (-not ($Meta -and $Meta.Pid)) { return $null }
+    $pr = if ($PSBoundParameters.ContainsKey('Processo')) { $Processo }
+          else { Get-Process -Id ([int]$Meta.Pid) -ErrorAction SilentlyContinue }
+    if (-not $pr) { return $null }
+    $avvio = $null
+    try { $avvio = $pr.StartTime } catch { $avvio = $null }
+    if ($null -ne $avvio) {
+        return Get-STSlotForPid -ProcId ([int]$Meta.Pid) -ProcName "$($pr.ProcessName).exe" -ProcStart $avvio -Slots @($Meta)
+    }
+    Get-STSlotForPid -ProcId ([int]$Meta.Pid) -ProcName "$($pr.ProcessName).exe" -Slots @($Meta)
+}
+
 # I tab attualmente APERTI = quelli il cui processo (Pid) e' ancora vivo. Piu' robusto
 # della recenza per "salva la finestra": prende anche i tab idle (heartbeat fermo).
 function Get-STOpenSlots {
@@ -297,19 +327,13 @@ function Get-STOpenSlots {
     # Save-STWorkspace adesso salverebbe venti righe per quindici schede, due delle quali
     # con l'etichetta sbagliata. Stesse due guardie di Get-STSlotForPid, chieste allo
     # stesso posto: il nome del processo e il battito non anteriore all'avvio.
+    # La valutazione e' per meta (Get-STSlotSeVivo): un meta avvelenato si scarta da solo,
+    # non porta giu' la pipeline.
     if (-not (Test-Path -LiteralPath $script:STRoot)) { return @() }
     $metas = Get-ChildItem -LiteralPath $script:STRoot -Directory -ErrorAction SilentlyContinue |
         ForEach-Object { Read-STMeta $_.Name } |
-        Where-Object {
-            if (-not ($_ -and $_.Pid)) { return $false }
-            $pr = Get-Process -Id $_.Pid -ErrorAction SilentlyContinue
-            if (-not $pr) { return $false }
-            $avvio = $null; $noto = $false
-            try { $avvio = $pr.StartTime; $noto = $true } catch { $noto = $false }
-            $slot = if ($noto) { Get-STSlotForPid -ProcId ([int]$_.Pid) -ProcName "$($pr.ProcessName).exe" -ProcStart $avvio -Slots @($_) }
-                    else       { Get-STSlotForPid -ProcId ([int]$_.Pid) -ProcName "$($pr.ProcessName).exe" -Slots @($_) }
-            [bool]$slot
-        }
+        ForEach-Object { Get-STSlotSeVivo -Meta $_ } |
+        Where-Object { $_ }
     if (-not $metas) { return @() }
     @($metas | Sort-Object { [datetime]::Parse($_.Created, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) })
 }

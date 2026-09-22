@@ -544,6 +544,35 @@ try {
     # E i nomi buoni passano da Save- come prima: sono le prove 'rt' e 'soloA' in testa
     # al banco, verdi oggi come ieri.
 
+    Section "Get-STOpenSlots sopravvive al dato cattivo (il ticket delle 2 rosse)"
+    # Su un processo PROTETTO StartTime non lancia: torna $null. PRIMA quel $null finiva
+    # nel [datetime]$ProcStart e l'errore di trasformazione abbatteva TUTTA la pipeline:
+    # nemmeno gli slot sani arrivavano, e Save-STWorkspace salvava il vuoto (visto il
+    # 22/09 sulla root vera, con atieclxx.exe e WmiApSrv.exe). "Non ho potuto guardare"
+    # non e' "e' morto". La valutazione vive in Get-STSlotSeVivo, non esportata: si
+    # chiama nello scope del modulo con un processo finto, perche' un processo protetto
+    # vero non e' portabile. I due metas avvelenati nella root vera NON vanno cancellati
+    # (dati sul disco; la loro rimozione e' una decisione separata): le due prove rosse
+    # di PROVA-lettura-nome-2026-09-01.ps1 devono diventare verdi DA SOLE.
+    $gsv = { param($m,$p) & (Get-Module STerminal) { param($mm,$pp) Get-STSlotSeVivo -Meta $mm -Processo $pp } $m $p }
+    $adesso = Get-Date
+    $metaSano = [pscustomobject]@{ Slot='s1'; Title='t'; Cwd='C:\s'; Shell='powershell.exe'; Pid=111; Created=$adesso.ToString('o'); Heartbeat=$adesso.ToString('o'); Closed=$false }
+    $procProtetto = [pscustomobject]@{ ProcessName='atieclxx'; StartTime=$null }
+    Check "protetto (StartTime $null): nessuna eccezione, meta scartato" { try { $null -eq (& $gsv $metaSano $procProtetto) } catch { $false } }
+    $procStessoNome = [pscustomobject]@{ ProcessName='powershell'; StartTime=$null }
+    # Meta col pid del banco stesso (powershell.exe vivo): la strada senza -ProcStart
+    # rilegge il processo e risponde senza eccezioni.
+    $metaBanco = [pscustomobject]@{ Slot='s2'; Title='t'; Cwd='C:\s'; Shell='powershell.exe'; Pid=$PID; Created=$adesso.ToString('o'); Heartbeat=$adesso.ToString('o'); Closed=$false }
+    Check "senza orologio ma processo suo: accettato, nessuna eccezione" { try { $null -ne (& $gsv $metaBanco $procStessoNome) } catch { $false } }
+    $procSano = [pscustomobject]@{ ProcessName='powershell'; StartTime=$adesso.AddHours(-1) }
+    Check "orologio leggibile: le due guardie come prima"                { ($null -ne (& $gsv $metaSano $procSano)) }
+    $procNomeAltro = [pscustomobject]@{ ProcessName='msedge'; StartTime=$adesso.AddHours(-1) }
+    Check "nome sbagliato: scartato come prima"                          { ($null -eq (& $gsv $metaSano $procNomeAltro)) }
+    $procRiciclato = [pscustomobject]@{ ProcessName='powershell'; StartTime=$adesso.AddHours(1) }
+    Check "battito anteriore all'avvio: scartato come prima"             { ($null -eq (& $gsv $metaSano $procRiciclato)) }
+    Check "meta senza pid: scartato"                                     { ($null -eq (& $gsv ([pscustomobject]@{ Slot='x' }) $procSano)) }
+    Check "processo morto (null dato): scartato"                         { ($null -eq (& $gsv $metaSano $null)) }
+
     Section "Get-STNameFromLaunch - F2: il venv senza punto (context-server)"
     # La funzione non e' esportata: si chiama nello scope del modulo, come fece il
     # manovale. La regola vale in tutte e due le direzioni: il caso vero deve parlare,
