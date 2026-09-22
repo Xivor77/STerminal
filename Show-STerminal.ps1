@@ -126,11 +126,26 @@ function Invoke-STAddDialog {
         if ($rbMan.IsChecked) {
             $tabs = @(foreach ($r in $rowCtrls) {
                 $col = if ($r.ColorBox.SelectedItem) { [string]$r.ColorBox.SelectedItem.Content } else { $null }
-                @{ Title = $r.TitleBox.Text; Color = $col; Cwd = $r.Tab.Cwd; Command = $r.Tab.Command; Shell = $r.Tab.Shell }
+                # Intento viaggia con la riga: e' la parte della firma che distingue due
+                # schede che il solo comando del lanciatore farebbe collassare.
+                # Fonte viaggia dal 22/09 (D2b la legge): se la persona ha riscritto la
+                # casella il nome e' suo ('persona'), se l'ha lasciata com'era resta
+                # quella della riga viva. Cosi' un 'cmd' scelto a mano non viene mai
+                # confuso col ripiego muto.
+                $fonteR = if ($r.TitleBox.Text -ne [string]$r.Tab.What) { 'persona' } else { $r.Tab.Fonte }
+                @{ Title = $r.TitleBox.Text; Color = $col; Cwd = $r.Tab.Cwd; Command = $r.Tab.Command; Shell = $r.Tab.Shell; Intento = $r.Tab.Intento; Fonte = $fonteR }
             })
             $esito.Valore = @{ Name = $name; AutoColor = $false; Tabs = $tabs }
         } else {
-            $tabs = @(foreach ($r in $rowCtrls) { @{ Title = $r.Tab.What; Cwd = $r.Tab.Cwd; Command = $r.Tab.Command; Shell = $r.Tab.Shell } })
+            $tabs = @(foreach ($r in $rowCtrls) {
+                # D2a (22/09): in automatico il nome muto non si spaccia per titolo. Se
+                # What viene dal ripiego (Fonte='processo') ed e' un nome generico, il
+                # Title resta VUOTO -- vuoto dice "non so", che e' onesto; la firma non
+                # cambia (il Title non entra nella firma). La stessa guardia in
+                # profondita' vive in Add-STWorkspaceTab (D2b).
+                $tit = if ($r.Tab.Fonte -eq 'processo' -and (Test-STNomeGenerico ([string]$r.Tab.What))) { '' } else { $r.Tab.What }
+                @{ Title = $tit; Cwd = $r.Tab.Cwd; Command = $r.Tab.Command; Shell = $r.Tab.Shell; Intento = $r.Tab.Intento; Fonte = $r.Tab.Fonte }
+            })
             $esito.Valore = @{ Name = $name; AutoColor = $true; Tabs = $tabs }
         }
         $dlg.DialogResult = $true; $dlg.Close()
@@ -291,6 +306,18 @@ $btnAdd.Add_Click({
     # sempre il numero di tab selezionati, anche quando il motore ne aveva scartati.
     $t = "Aggiunti $($esito.Added) tab a '$($esito.Name)' (l'area ne ha $($esito.Total))."
     if ($esito.SkippedRecipe) { $t += "  $($esito.SkippedRecipe) c'erano gia': saltati." }
+    # Il canale segue la cattura (regola 30/08): se tutti i tab selezionati stanno nello
+    # STESSO terminale, l'area lo registra (sidecar, non workspace.json: i campi di la'
+    # hanno gia' tre scrittori). Misti o non osservabili -> niente registrazione: il
+    # resume usera' l'alias come ieri, e la riga di stato lo dice.
+    if ($esito.Added -gt 0) {
+        $canali = @($live | ForEach-Object { if ($_.PSObject.Properties['Terminale']) { [string]$_.Terminale } } | Where-Object { $_ } | Select-Object -Unique)
+        if ($canali.Count -eq 1) {
+            Set-STWorkspaceTerminale -Name $r.Name -Path $canali[0] -Fonte 'cattura'
+        } elseif ($canali.Count -gt 1) {
+            $t += "  Terminali misti: canale non registrato."
+        }
+    }
     $status.Text = $t
 })
 
