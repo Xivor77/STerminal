@@ -385,6 +385,48 @@ try {
     Check "con canale alfa e' accettato" { $okAlpha }
     Set-STWorkspaceColor -Name 'ciclo' -Color '#FEDCBA' | Out-Null
 
+    Section "Set-STWorkspaceTabTitle - il gesto, non la decisione (D3)"
+    # Fixture scritta a mano: tutti i campi che il gesto NON deve toccare, compresi
+    # uno storico col suo file e il sidecar del canale. Le righe 1 e 2 hanno la
+    # STESSA ricetta apposta: servono per l'indirizzo ambiguo.
+    $rnDir = Join-Path $wsDir 'rn'
+    New-Item -ItemType Directory -Force -Path $rnDir | Out-Null
+    'contenuto storico' | Set-Content -LiteralPath (Join-Path $rnDir 'tab-0.log') -Encoding utf8
+    'byte-del-sidecar' | Set-Content -LiteralPath (Join-Path $rnDir 'terminale.json') -Encoding utf8
+    ([pscustomobject]@{
+        Name='rn'; Created=(Get-Date).ToString('o'); UiColor='#112233'
+        Tabs=@(
+            [pscustomobject]@{ Title='uno'; Color='#1FAA55'; Cwd='C:\a'; Shell='powershell.exe'; Command='& uno'; Intento='i1'; Fonte='lancio';   Storico='tab-0.log' },
+            [pscustomobject]@{ Title='cmd'; Color='#2D7D9A'; Cwd='C:\b'; Shell='powershell.exe'; Command='& due'; Intento='i2'; Fonte='processo'; Storico=$null },
+            [pscustomobject]@{ Title='tre'; Color='#3B7DD8'; Cwd='C:\b'; Shell='powershell.exe'; Command='& due'; Intento='i3'; Fonte='meta';     Storico=$null }
+        )
+    } | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath (Join-Path $rnDir 'workspace.json') -Encoding utf8
+    $rnWj = Join-Path $rnDir 'workspace.json'
+    $primaJson = Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json
+    $sidePrima = (Get-FileHash -LiteralPath (Join-Path $rnDir 'terminale.json') -Algorithm MD5).Hash
+
+    $r1 = Set-STWorkspaceTabTitle -Name 'rn' -Title 'docker' -Cwd 'C:\a' -Command '& uno'
+    Check "rinomina per ricetta: fatta, riga 0"       { ($r1.Rinominata -and $r1.Riga -eq 0 -and $r1.Prima -eq 'uno') }
+    $dopoJson = Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json
+    Check "il Title e' cambiato"                       { ($dopoJson.Tabs[0].Title -eq 'docker') }
+    Check "le altre righe identiche"                   { ((($dopoJson.Tabs[1] | ConvertTo-Json -Depth 6 -Compress) -eq ($primaJson.Tabs[1] | ConvertTo-Json -Depth 6 -Compress)) -and (($dopoJson.Tabs[2] | ConvertTo-Json -Depth 6 -Compress) -eq ($primaJson.Tabs[2] | ConvertTo-Json -Depth 6 -Compress))) }
+    Check "Intento/Fonte/Storico della riga identici"  { ($dopoJson.Tabs[0].Intento -eq 'i1' -and $dopoJson.Tabs[0].Fonte -eq 'lancio' -and $dopoJson.Tabs[0].Storico -eq 'tab-0.log' -and $dopoJson.Tabs[0].Command -eq '& uno' -and $dopoJson.Tabs[0].Color -eq '#1FAA55') }
+    Check "UiColor identico"                           { ($dopoJson.UiColor -eq '#112233') }
+    Check "sidecar byte-identico"                      { ((Get-FileHash -LiteralPath (Join-Path $rnDir 'terminale.json') -Algorithm MD5).Hash -eq $sidePrima) }
+    Check "storico intatto"                            { ((Get-Content -LiteralPath (Join-Path $rnDir 'tab-0.log') -Raw) -match 'contenuto storico') }
+
+    $rawPrima = Get-Content -LiteralPath $rnWj -Raw
+    $r2 = Set-STWorkspaceTabTitle -Name 'rn' -Title 'x' -Cwd 'C:\b' -Command '& due'
+    Check "indirizzo ambiguo: NON rinomina (2 righe)"  { (-not $r2.Rinominata -and $r2.Righe -eq 2) }
+    Check "ambiguita': file non toccato"               { ((Get-Content -LiteralPath $rnWj -Raw) -eq $rawPrima) }
+    $r3 = Set-STWorkspaceTabTitle -Name 'rn' -Title 'x' -Cwd 'C:\zzz'
+    Check "nessuna riga all'indirizzo: NON rinomina"   { (-not $r3.Rinominata -and $r3.Righe -eq 0) }
+    $r4 = Set-STWorkspaceTabTitle -Name 'rn' -Title 'x'
+    Check "nessun indirizzo dato: NON rinomina"        { (-not $r4.Rinominata) }
+    $r5 = Set-STWorkspaceTabTitle -Name 'rn' -Title 'claude' -TitleVecchio 'cmd' -Cwd 'C:\b'
+    Check "TitleVecchio + ricetta: una riga sola"      { ($r5.Rinominata -and $r5.Riga -eq 1) }
+    Check "TitleVecchio: file aggiornato"              { ((Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json).Tabs[1].Title -eq 'claude') }
+
     Section "mini-interfaccia (dialogo Aggiungi a gruppo)"
     # Le prove del dialogo vivono nello script della UI, perche' li' ci sono i controlli
     # WPF; ma se restano fuori dalla suite, un TUTTO VERDE qui non dice niente su meta'

@@ -493,6 +493,80 @@ function New-STWorkspace {
     Write-Host "STerminal: area '$Name' definita ($($list.Count) tab)." -ForegroundColor Green
 }
 
+# Rinomina UN tab di un'area: il gesto, non la decisione (D3, 23/09). QUALI debbano
+# essere i titoli lo sceglie una persona; questa funzione sa solo cambiare un Title
+# senza rompere il resto. workspace.json non ha id per i tab: la riga si indirizza
+# per selettori (posizione, titolo attuale, ricetta anche parziale) e la regola e'
+# quella di Get-STCampiRicettaPrecedenti -- se l'indirizzo non individua UNA riga
+# sola, la rinomina NON avviene e lo dice. Un titolo scritto sulla riga sbagliata
+# e' peggio di un titolo sbagliato: il secondo si vede, il primo no.
+function Set-STWorkspaceTabTitle {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Title,                # il titolo NUOVO
+        [int]$Index = -1,                                    # posizione (0-based), se nota
+        [string]$TitleVecchio,                               # il titolo che la riga ha ORA
+        [string]$Cwd, [string]$Shell, [string]$Command       # la ricetta, anche parziale
+    )
+    $dir = Get-STWorkspaceDir $Name
+    $wj = Join-Path $dir 'workspace.json'
+    if (-not (Test-Path -LiteralPath $wj)) {
+        Write-Warning "STerminal: area '$Name' non trovata."
+        return
+    }
+    # ATTENZIONE: un parametro [string] NON passato vale '' e non $null (il binder
+    # converte), quindi "dato o no" si legge in $PSBoundParameters -- un controllo a
+    # $null non vedrebbe mai il "non dato", e un controllo a verita' non distinguerebbe
+    # -TitleVecchio '' (cerco proprio la riga senza titolo) dal non averlo passato.
+    $datoIndex   = $Index -ge 0
+    $datoTitolo  = $PSBoundParameters.ContainsKey('TitleVecchio')
+    $datoCwd     = $PSBoundParameters.ContainsKey('Cwd')
+    $datoShell   = $PSBoundParameters.ContainsKey('Shell')
+    $datoCommand = $PSBoundParameters.ContainsKey('Command')
+    # Almeno un selettore: senza indirizzo "la riga" sarebbe "tutte", ed e' gia'
+    # un'ambiguita'.
+    if (-not ($datoIndex -or $datoTitolo -or $datoCwd -or $datoShell -or $datoCommand)) {
+        Write-Warning "STerminal: rinomina NON fatta in '$Name': nessun indirizzo dato (Index, TitleVecchio o ricetta). Quale riga?"
+        return [pscustomobject]@{ Name = $Name; Rinominata = $false; Motivo = 'nessun indirizzo dato'; Righe = -1 }
+    }
+    $ws = Get-Content -LiteralPath $wj -Raw | ConvertFrom-Json
+    $tabs = @($ws.Tabs)
+    $match = [System.Collections.Generic.List[int]]::new()
+    for ($i = 0; $i -lt $tabs.Count; $i++) {
+        $r = $tabs[$i]
+        if ($datoIndex -and $i -ne $Index) { continue }
+        if ($datoTitolo -and ([string]$r.Title) -cne $TitleVecchio) { continue }
+        if ($datoCwd -or $datoShell -or $datoCommand) {
+            # Il selettore prende i campi mancanti dalla riga stessa: cosi' la ricetta
+            # si confronta con la normalizzazione VERA (Get-STTabSignature), e un
+            # campo taciuto vale "qualunque".
+            $sel = [pscustomobject]@{
+                Cwd     = if ($datoCwd) { $Cwd } else { $r.Cwd }
+                Shell   = if ($datoShell) { $Shell } else { $r.Shell }
+                Command = if ($datoCommand) { $Command } else { $r.Command }
+            }
+            if ((Get-STTabSignature $r -SenzaIntento) -ne (Get-STTabSignature $sel -SenzaIntento)) { continue }
+        }
+        $match.Add($i)
+    }
+    if ($match.Count -ne 1) {
+        $perche = if ($match.Count -eq 0) { "nessuna riga all'indirizzo dato" }
+                  else { "l'indirizzo prende $($match.Count) righe (posizioni $($match -join ', ')): servono piu' selettori" }
+        Write-Warning "STerminal: rinomina NON fatta in '$Name': $perche."
+        return [pscustomobject]@{ Name = $Name; Rinominata = $false; Motivo = $perche; Righe = $match.Count }
+    }
+    $k = $match[0]
+    $prima = [string]$tabs[$k].Title
+    if ($tabs[$k].PSObject.Properties['Title']) { $tabs[$k].Title = $Title }
+    else { $tabs[$k] | Add-Member -NotePropertyName Title -NotePropertyValue $Title }
+    # Si riscrive il FILE, non la cartella: Storico, terminale.json e le altre righe
+    # non sopravvivono perche' preservate -- non vengono toccate proprio.
+    ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wj -Encoding utf8
+    Write-Host "STerminal: area '$Name', riga ${k}: '$prima' -> '$Title'." -ForegroundColor Green
+    [pscustomobject]@{ Name = $Name; Rinominata = $true; Riga = $k; Prima = $prima; Dopo = $Title }
+}
+
 # Apre un singolo tab di un'area: ristampa lo storico (testo) e poi diventa un tab vivo
 # (re-Initialize), cosi' l'area si puo' ri-salvare.
 function Open-STWorkspaceTab {
@@ -1572,4 +1646,5 @@ Export-ModuleMember -Function Initialize-STerminal, Restore-STerminal, Set-STerm
     Save-STWorkspace, New-STWorkspace, Add-STWorkspaceTab, Resume-STWorkspace, Get-STResumeTabSpec,
     Get-STResumeArgs, Open-STWorkspaceTab, Get-STWorkspace, Get-STWorkspaceDir, Remove-STWorkspace,
     Get-STLiveTab, ConvertTo-STRunnable, Get-STTabSignature, Set-STWorkspaceColor, Get-STLiveTabAreas, Get-STLiveRowSpec,
-    Get-STSlotForPid, Get-STLastTypedLine, Get-STNameFromLine, Test-STNomeGenerico, Set-STWorkspaceTerminale
+    Get-STSlotForPid, Get-STLastTypedLine, Get-STNameFromLine, Test-STNomeGenerico, Set-STWorkspaceTerminale,
+    Set-STWorkspaceTabTitle
