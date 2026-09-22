@@ -487,6 +487,39 @@ try {
     Check "file non aggiornabile: NON rinomina"        { (-not $rb.Rinominata) }
     Check "e la cartella e' tornata indietro"          { ((Test-Path -LiteralPath (Join-Path $wsDir 'rnrb')) -and -not (Test-Path -LiteralPath (Join-Path $wsDir 'rnrb-new'))) }
 
+    Section "la guardia sui nomi di area: UNA SOLA, tre strade"
+    # Frank, 22/09: la guardia va anche alla creazione, UNA e non tre copie. L'osservabile:
+    # un nome cattivo e' rifiutato dalle tre strade CON LO STESSO MOTIVO, e i nomi buoni
+    # passano da tutte e tre come prima -- una guardia si prova anche su cio' che NON deve
+    # fermare. Le due aree vere restano accettate: il numero del manovale (0 su 2),
+    # verificato col codice nuovo -- solo stringhe, il disco delle aree vere mai toccato.
+    Check "nome buono: la guardia tace"                 { ($null -eq (Test-STNomeArea 'buono')) }
+    Check "caratteri vietati: motivo"                   { ((Test-STNomeArea 'a:b') -match 'caratteri non validi') }
+    Check "punto: sembra un file (Frank)"               { ((Test-STNomeArea 'area.txt') -match 'sembrare un file') }
+    Check "riservato: motivo"                           { ((Test-STNomeArea 'CON') -match 'riservato') }
+    Check "spazio finale: motivo"                       { ((Test-STNomeArea 'x ') -match 'spazio finale') }
+    Check "vuoto: motivo"                               { ((Test-STNomeArea '   ') -match 'vuoto') }
+    Check "recupero (area vera): accettato"             { ($null -eq (Test-STNomeArea 'recupero')) }
+    Check "sistema (area vera): accettato"              { ($null -eq (Test-STNomeArea 'sistema')) }
+    $gNew = New-STWorkspace -Name 'male:via' -Tabs @(@{ Title='m'; Cwd='C:\m'; Command='& m' })
+    Check "New- rifiuta: esito col motivo"              { ($gNew.Rifiutata -and $gNew.Motivo -match 'caratteri non validi') }
+    Check "New- rifiuta: niente cartella"               { (-not (Get-ChildItem -LiteralPath $wsDir -Directory -Filter 'male*')) }
+    New-STWorkspace -Name 'buona' -Tabs @(@{ Title='b'; Cwd='C:\b1'; Command='& b' }) | Out-Null
+    Check "New- nome buono: crea come prima"            { (Test-Path -LiteralPath (Join-Path (Join-Path $wsDir 'buona') 'workspace.json')) }
+    $gAdd = Add-STWorkspaceTab -Name 'male:via' -Tabs @(@{ Title='m'; Cwd='C:\m'; Command='& m' })
+    Check "Add- rifiuta: stessa forma, stesso motivo"   { ($gAdd.Rifiutata -and $gAdd.Added -eq 0 -and $gAdd.Motivo -eq $gNew.Motivo) }
+    Check "Add- rifiuta: niente cartella"               { (-not (Get-ChildItem -LiteralPath $wsDir -Directory -Filter 'male*')) }
+    $gAddOk = Add-STWorkspaceTab -Name 'buona' -Tabs @(@{ Title='b2'; Cwd='C:\b2'; Command='& b2' })
+    Check "Add- nome buono: aggiunge come prima"        { ($gAddOk.Added -eq 1 -and $gAddOk.Total -eq 2) }
+    $gRen = Rename-STWorkspace -Name 'buona' -NewName 'male:via'
+    Check "le tre strade: un motivo solo"               { ((-not $gRen.Rinominata) -and $gRen.Motivo -eq $gNew.Motivo) }
+    # Il caso di Bruce: un'area con un nome che ALTROVE era legale (il punto) e qui non
+    # sarebbe mai nata. Add- si ferma anche se l'area esiste gia': non si allarga un nome cattivo.
+    $dirB = Join-Path $wsDir 'v1.2'; New-Item -ItemType Directory -Force -Path $dirB | Out-Null
+    (@{ Name='v1.2'; Created=(Get-Date).ToString('o'); Tabs=@(); UiColor=$null } | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath (Join-Path $dirB 'workspace.json') -Encoding utf8
+    $gB = Add-STWorkspaceTab -Name 'v1.2' -Tabs @(@{ Title='x'; Cwd='C:\x'; Command='& x' })
+    Check "nome nato altrove: Add- si ferma"            { ($gB.Rifiutata -and $gB.Motivo -match 'sembrare un file') }
+
     Section "Get-STNameFromLaunch - F2: il venv senza punto (context-server)"
     # La funzione non e' esportata: si chiama nello scope del modulo, come fece il
     # manovale. La regola vale in tutte e due le direzioni: il caso vero deve parlare,

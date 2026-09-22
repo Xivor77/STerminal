@@ -440,6 +440,9 @@ $btnAdd.Add_Click({
     if (-not $r) { return }
     $esito = if ($r.AutoColor) { Add-STWorkspaceTab -Name $r.Name -Tabs $r.Tabs -AutoColor }
              else { Add-STWorkspaceTab -Name $r.Name -Tabs $r.Tabs }
+    # Il no del motore (la guardia sui nomi, 22/09) non si ingoia: "Aggiunti 0 tab"
+    # farebbe credere che e' andata e non e' andata.
+    if ($esito.Rifiutata) { $status.Text = "NON aggiunti a '$($esito.Name)': $($esito.Motivo)"; return }
     Update-WsList
     # Si dice cosa e' successo, non cosa era stato chiesto: prima questa riga annunciava
     # sempre il numero di tab selezionati, anche quando il motore ne aveva scartati.

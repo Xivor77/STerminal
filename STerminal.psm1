@@ -437,6 +437,14 @@ function New-STWorkspace {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][object[]]$Tabs
     )
+    # La guardia sui nomi e' UNA SOLA (Test-STNomeArea) e sta qui in testa: prima del
+    # 22/09 il nome finiva dritto in Join-Path, e un 'a:b' diventava un percorso.
+    # Sul si' la funzione tace come ieri; sul no torna un esito col motivo.
+    $motivoNome = Test-STNomeArea $Name
+    if ($motivoNome) {
+        Write-Warning "STerminal: creazione NON fatta: '$Name': $motivoNome."
+        return [pscustomobject]@{ Name = $Name; Rifiutata = $true; Motivo = $motivoNome }
+    }
     $dir = Get-STWorkspaceDir $Name
     # Il colore dell'area si legge PRIMA: qui sotto la cartella viene CANCELLATA e
     # ricreata da zero, quindi rileggerlo dopo significa leggere un file che non c'e' piu'.
@@ -801,6 +809,27 @@ function Remove-STWorkspace {
     } else { Write-Warning "STerminal: area '$Name' non trovata." }
 }
 
+# La guardia sui nomi di area: UNA SOLA, chiamata da Rename-, New- e Add- (22/09,
+# decisione di Frank). Tre copie della stessa regola sono tre regole che divergono --
+# la lezione dei tre scrittori. Se un giorno si aggiunge un nome riservato, si aggiunge
+# QUI. Ritorna $null se il nome e' valido, il MOTIVO del rifiuto altrimenti: la forma
+# del no la decide chi chiama. Le regole: non vuoto; niente caratteri vietati; niente
+# punti -- un punto la fa sembrare un FILE, e Frank: "un'area chiamata come un file
+# voglio che si fermi" (copre anche '..' e il punto finale); niente spazio finale
+# (Windows lo mangia e il nome non tornerebbe); niente nomi riservati di Windows, che
+# rifiutiamo anche se il filesystem li accetta: una cartella CON e' una trappola per
+# ogni altro strumento.
+function Test-STNomeArea {
+    param([Parameter(Mandatory)][string]$Nome)
+    if ($Nome -notmatch '\S') { return 'nome vuoto' }
+    if ($Nome.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { return 'caratteri non validi per una cartella (\ / : * ? " < > |)' }
+    if ($Nome.Contains('.')) { return 'un punto nel nome la fa sembrare un file' }
+    if ($Nome -match ' $') { return 'spazio finale: Windows lo mangerebbe' }
+    $riservati = @('CON','PRN','AUX','NUL') + (1..9 | ForEach-Object { "COM$_"; "LPT$_" })
+    if ($riservati -contains $Nome.ToUpperInvariant()) { return "nome riservato di Windows ($Nome)" }
+    return $null
+}
+
 # Rinomina UN'area: il gesto, non la decisione (22/09). Il nome di un'area sta in DUE
 # posti soli -- la cartella e il campo Name dentro workspace.json -- e la fermata 4 del
 # mandato e' stata verificata PRIMA di scrivere: il sidecar terminale.json non contiene
@@ -809,10 +838,8 @@ function Remove-STWorkspace {
 # aggiorna il Name nel file. Stessa regola di Set-STWorkspaceTabTitle: rifiuta invece
 # di rovinare, e dice perche'. MAI fondere due aree: se il nome nuovo esiste gia', si
 # rifiuta -- una fusione e' perdita di dati.
-# La guardia sul nome nuovo vive QUI: e' il gesto che crea la cartella, e non puo'
-# crearne una col nome sbagliato. Il buco GEMELLO alla creazione (New-/Add- prendono
-# il nome e lo passano dritto a Join-Path) esisteva prima di questo gesto e resta:
-# allargare la guardia al modulo e' una decisione che non mi e' stata data.
+# La validita' del nome nuovo la dice Test-STNomeArea: la guardia e' UNA per tutte le
+# strade che creano o cambiano un'area.
 function Rename-STWorkspace {
     [CmdletBinding()]
     param(
@@ -830,20 +857,10 @@ function Rename-STWorkspace {
         Write-Warning "STerminal: rinomina NON fatta: '$NewName' e' gia' il nome dell'area."
         return (& $niente 'il nome nuovo e'' uguale al vecchio')
     }
-    # Un nome valido come cartella: non vuoto, senza i caratteri vietati, non un nome
-    # riservato di Windows (li rifiutiamo anche se il filesystem li accetta: una
-    # cartella CON e' una trappola per ogni altro strumento), niente punto o spazio
-    # finale (Windows li mangia e il nome non tornerebbe), mai solo punti ('..' e'
-    # la cartella madre).
+    # La guardia e' UNA SOLA (Test-STNomeArea): se il nome non va, lo stesso motivo
+    # esce identico dalle tre strade (rinomina, creazione, aggiunta).
+    $motivoNome = Test-STNomeArea $NewName
     $soloMaiuscole = ($NewName -eq $Name)   # stesso nome a meno di maiuscole: permesso
-    $motivoNome = $null
-    $base = ($NewName -split '\.')[0]
-    $riservati = @('CON','PRN','AUX','NUL') + (1..9 | ForEach-Object { "COM$_"; "LPT$_" })
-    if ($NewName -notmatch '\S')                                     { $motivoNome = 'nome vuoto' }
-    elseif ($NewName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { $motivoNome = 'caratteri non validi per una cartella (\ / : * ? " < > |)' }
-    elseif ($NewName -match '^\.+$')                                 { $motivoNome = 'un nome di soli punti non e'' una cartella' }
-    elseif ($NewName -match '[. ]$')                                 { $motivoNome = 'punto o spazio finale: Windows lo mangerebbe' }
-    elseif ($riservati -contains $base.ToUpperInvariant())           { $motivoNome = "nome riservato di Windows ($base)" }
     if ($motivoNome) {
         Write-Warning "STerminal: rinomina NON fatta in '$Name': $motivoNome."
         return (& $niente $motivoNome)
@@ -1608,6 +1625,16 @@ function Add-STWorkspaceTab {
     # UI protegge una strada sola.
     # Chi vuole davvero due tab gemelli lo dice con -AllowDuplicate: un gesto deliberato,
     # non un caso.
+    # La guardia sui nomi e' UNA SOLA (Test-STNomeArea) e sta qui in testa, PRIMA di
+    # New-Item: un rifiuto non deve nemmeno creare la cartella vuota. Vale sul nome e
+    # basta, anche per un'area che esiste gia': un nome nato altrove (un'altra macchina)
+    # che la guardia non avrebbe lasciato passare qui non si allarga -- si ferma, e il
+    # motivo e' lo stesso delle altre due strade.
+    $motivoNome = Test-STNomeArea $Name
+    if ($motivoNome) {
+        Write-Warning "STerminal: aggiunta NON fatta in '$Name': $motivoNome."
+        return [pscustomobject]@{ Name = $Name; Added = 0; SkippedExact = 0; SkippedRecipe = 0; Total = 0; Rifiutata = $true; Motivo = $motivoNome }
+    }
     $dir = Get-STWorkspaceDir $Name
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $wj = Join-Path $dir 'workspace.json'
@@ -1731,4 +1758,4 @@ Export-ModuleMember -Function Initialize-STerminal, Restore-STerminal, Set-STerm
     Get-STResumeArgs, Open-STWorkspaceTab, Get-STWorkspace, Get-STWorkspaceDir, Remove-STWorkspace,
     Get-STLiveTab, ConvertTo-STRunnable, Get-STTabSignature, Set-STWorkspaceColor, Get-STLiveTabAreas, Get-STLiveRowSpec,
     Get-STSlotForPid, Get-STLastTypedLine, Get-STNameFromLine, Test-STNomeGenerico, Set-STWorkspaceTerminale,
-    Set-STWorkspaceTabTitle, Rename-STWorkspace
+    Set-STWorkspaceTabTitle, Rename-STWorkspace, Test-STNomeArea
