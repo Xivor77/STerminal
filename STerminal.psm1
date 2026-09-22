@@ -801,6 +801,76 @@ function Remove-STWorkspace {
     } else { Write-Warning "STerminal: area '$Name' non trovata." }
 }
 
+# Rinomina UN'area: il gesto, non la decisione (22/09). Il nome di un'area sta in DUE
+# posti soli -- la cartella e il campo Name dentro workspace.json -- e la fermata 4 del
+# mandato e' stata verificata PRIMA di scrivere: il sidecar terminale.json non contiene
+# il nome, i meta degli slot nemmeno, gli storici sono path relativi, i tab vivi si
+# agganciano per ricetta e non per nome. Quindi il gesto e': rinomina la cartella e
+# aggiorna il Name nel file. Stessa regola di Set-STWorkspaceTabTitle: rifiuta invece
+# di rovinare, e dice perche'. MAI fondere due aree: se il nome nuovo esiste gia', si
+# rifiuta -- una fusione e' perdita di dati.
+# La guardia sul nome nuovo vive QUI: e' il gesto che crea la cartella, e non puo'
+# crearne una col nome sbagliato. Il buco GEMELLO alla creazione (New-/Add- prendono
+# il nome e lo passano dritto a Join-Path) esisteva prima di questo gesto e resta:
+# allargare la guardia al modulo e' una decisione che non mi e' stata data.
+function Rename-STWorkspace {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$NewName
+    )
+    $niente = { param($m) [pscustomobject]@{ Name = $Name; Rinominata = $false; Motivo = $m; Prima = $Name; Dopo = $NewName } }
+    $dir    = Get-STWorkspaceDir $Name
+    $wj     = Join-Path $dir 'workspace.json'
+    if (-not (Test-Path -LiteralPath $wj)) {
+        Write-Warning "STerminal: area '$Name' non trovata."
+        return (& $niente 'area non trovata')
+    }
+    if ($NewName -ceq $Name) {
+        Write-Warning "STerminal: rinomina NON fatta: '$NewName' e' gia' il nome dell'area."
+        return (& $niente 'il nome nuovo e'' uguale al vecchio')
+    }
+    # Un nome valido come cartella: non vuoto, senza i caratteri vietati, non un nome
+    # riservato di Windows (li rifiutiamo anche se il filesystem li accetta: una
+    # cartella CON e' una trappola per ogni altro strumento), niente punto o spazio
+    # finale (Windows li mangia e il nome non tornerebbe), mai solo punti ('..' e'
+    # la cartella madre).
+    $soloMaiuscole = ($NewName -eq $Name)   # stesso nome a meno di maiuscole: permesso
+    $motivoNome = $null
+    $base = ($NewName -split '\.')[0]
+    $riservati = @('CON','PRN','AUX','NUL') + (1..9 | ForEach-Object { "COM$_"; "LPT$_" })
+    if ($NewName -notmatch '\S')                                     { $motivoNome = 'nome vuoto' }
+    elseif ($NewName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { $motivoNome = 'caratteri non validi per una cartella (\ / : * ? " < > |)' }
+    elseif ($NewName -match '^\.+$')                                 { $motivoNome = 'un nome di soli punti non e'' una cartella' }
+    elseif ($NewName -match '[. ]$')                                 { $motivoNome = 'punto o spazio finale: Windows lo mangerebbe' }
+    elseif ($riservati -contains $base.ToUpperInvariant())           { $motivoNome = "nome riservato di Windows ($base)" }
+    if ($motivoNome) {
+        Write-Warning "STerminal: rinomina NON fatta in '$Name': $motivoNome."
+        return (& $niente $motivoNome)
+    }
+    $dirNuova = Get-STWorkspaceDir $NewName
+    if (-not $soloMaiuscole -and (Test-Path -LiteralPath $dirNuova)) {
+        Write-Warning "STerminal: rinomina NON fatta: esiste gia' un'area '$NewName'. Niente fusioni."
+        return (& $niente "esiste gia' un'area '$NewName'")
+    }
+    Rename-Item -LiteralPath $dir -NewName $NewName
+    # La cartella ha gia' il nome nuovo: il Name nel file deve seguirla, o la UI
+    # mostrerebbe il nome vecchio (Get-STWorkspace legge il file, non la cartella).
+    # Se questa scrittura fallisce la cartella torna indietro: niente stati a meta'.
+    try {
+        $wjNuovo = Join-Path $dirNuova 'workspace.json'
+        $ws = Get-Content -LiteralPath $wjNuovo -Raw | ConvertFrom-Json
+        $ws.Name = $NewName
+        ($ws | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $wjNuovo -Encoding utf8
+    } catch {
+        try { Rename-Item -LiteralPath $dirNuova -NewName $Name } catch { }
+        Write-Warning "STerminal: rinomina NON fatta: cartella rinominata ma workspace.json non aggiornato ($($_.Exception.Message)). Nome cartella ripristinato."
+        return (& $niente 'workspace.json non aggiornabile: ripristinato')
+    }
+    Write-Host "STerminal: area '$Name' rinominata in '$NewName'." -ForegroundColor Green
+    [pscustomobject]@{ Name = $NewName; Rinominata = $true; Motivo = $null; Prima = $Name; Dopo = $NewName }
+}
+
 #endregion
 
 #region tab vivi (sorgente per la UI: cosa e' aperto adesso, anche tab NON registrati/occupati)
@@ -1661,4 +1731,4 @@ Export-ModuleMember -Function Initialize-STerminal, Restore-STerminal, Set-STerm
     Get-STResumeArgs, Open-STWorkspaceTab, Get-STWorkspace, Get-STWorkspaceDir, Remove-STWorkspace,
     Get-STLiveTab, ConvertTo-STRunnable, Get-STTabSignature, Set-STWorkspaceColor, Get-STLiveTabAreas, Get-STLiveRowSpec,
     Get-STSlotForPid, Get-STLastTypedLine, Get-STNameFromLine, Test-STNomeGenerico, Set-STWorkspaceTerminale,
-    Set-STWorkspaceTabTitle
+    Set-STWorkspaceTabTitle, Rename-STWorkspace

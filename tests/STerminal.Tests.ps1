@@ -431,6 +431,62 @@ try {
     Check "TitleVecchio: file aggiornato"              { ((Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json).Tabs[1].Title -eq 'claude') }
     Check "Fonte='persona' anche da 'processo'"        { ((Get-Content -LiteralPath $rnWj -Raw | ConvertFrom-Json).Tabs[1].Fonte -eq 'persona') }
 
+    Section "Rename-STWorkspace - il gesto sull'area, non la decisione"
+    # Il nome di un'area sta in DUE posti: la cartella e il campo Name dentro
+    # workspace.json (fermata 4 del mandato, verificata). L'osservabile: rinominata
+    # e INTATTA -- sidecar e storico byte per byte, righe coi loro Intento/Fonte.
+    New-STWorkspace -Name 'rnm' -Tabs @(
+        @{ Title='uno'; Cwd='C:\r1'; Shell='powershell.exe'; Command='& uno'; Intento='lavoro'; Fonte='persona' },
+        @{ Title='due'; Cwd='C:\r2'; Command='& due' }
+    ) | Out-Null
+    Set-STWorkspaceTerminale -Name 'rnm' -Path 'C:\fake\wt.exe' | Out-Null
+    $rnmDir = Join-Path $wsDir 'rnm'
+    'storico finto' | Set-Content -LiteralPath (Join-Path $rnmDir 'tab-0.log') -Encoding utf8
+    $md5Side = (Get-FileHash -LiteralPath (Join-Path $rnmDir 'terminale.json') -Algorithm MD5).Hash
+    $md5Stor = (Get-FileHash -LiteralPath (Join-Path $rnmDir 'tab-0.log') -Algorithm MD5).Hash
+    $colPrec = (Get-Content -LiteralPath (Join-Path $rnmDir 'workspace.json') -Raw | ConvertFrom-Json).UiColor
+    $rr = Rename-STWorkspace -Name 'rnm' -NewName 'rnm-new'
+    $rnmNewWj = Join-Path (Join-Path $wsDir 'rnm-new') 'workspace.json'
+    $wsNew = Get-Content -LiteralPath $rnmNewWj -Raw | ConvertFrom-Json
+    Check "rinomina: il gesto dice si'"                { ($rr.Rinominata -and $rr.Prima -eq 'rnm' -and $rr.Dopo -eq 'rnm-new') }
+    Check "la cartella ha il nome nuovo"               { ((-not (Test-Path -LiteralPath $rnmDir)) -and (Test-Path -LiteralPath (Join-Path $wsDir 'rnm-new'))) }
+    Check "il Name nel file segue la cartella"         { ($wsNew.Name -eq 'rnm-new') }
+    Check "righe intatte: titoli e comandi"            { ($wsNew.Tabs[0].Title -eq 'uno' -and $wsNew.Tabs[0].Command -eq '& uno' -and $wsNew.Tabs[1].Title -eq 'due') }
+    Check "righe intatte: Intento e Fonte"             { ($wsNew.Tabs[0].Intento -eq 'lavoro' -and $wsNew.Tabs[0].Fonte -eq 'persona') }
+    Check "UiColor intatto"                            { ($wsNew.UiColor -eq $colPrec) }
+    Check "sidecar byte-identico"                      { ((Get-FileHash -LiteralPath (Join-Path (Join-Path $wsDir 'rnm-new') 'terminale.json') -Algorithm MD5).Hash -eq $md5Side) }
+    Check "storico byte-identico"                      { ((Get-FileHash -LiteralPath (Join-Path (Join-Path $wsDir 'rnm-new') 'tab-0.log') -Algorithm MD5).Hash -eq $md5Stor) }
+    Check "Get-STWorkspace mostra il nome nuovo"       { ((Get-STWorkspace).Name -contains 'rnm-new' -and -not ((Get-STWorkspace).Name -contains 'rnm')) }
+    # I rifiuti: prima il no, e niente si muove.
+    New-STWorkspace -Name 'rnmA' -Tabs @(@{ Title='a'; Cwd='C:\ra'; Command='& a' }) | Out-Null
+    New-STWorkspace -Name 'rnmB' -Tabs @(@{ Title='b'; Cwd='C:\rb'; Command='& b' }) | Out-Null
+    $rj = Rename-STWorkspace -Name 'rnmA' -NewName 'rnmB'
+    Check "nome gia' preso: NON rinomina (niente fusioni)" { ((-not $rj.Rinominata) -and $rj.Motivo -match 'esiste') }
+    Check "nome gia' preso: tutto fermo"               { ((Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'rnmA') 'workspace.json') -Raw | ConvertFrom-Json).Name -eq 'rnmA') }
+    Check "caratteri vietati: NON rinomina"            { (-not (Rename-STWorkspace -Name 'rnmA' -NewName 'a:b').Rinominata) }
+    Check "nome riservato Windows: NON rinomina"       { (-not (Rename-STWorkspace -Name 'rnmA' -NewName 'CON').Rinominata) }
+    Check "punto finale: NON rinomina"                 { (-not (Rename-STWorkspace -Name 'rnmA' -NewName 'abc.').Rinominata) }
+    Check "solo punti ('..'): NON rinomina"            { (-not (Rename-STWorkspace -Name 'rnmA' -NewName '..').Rinominata) }
+    Check "spazi soli: NON rinomina"                   { (-not (Rename-STWorkspace -Name 'rnmA' -NewName '   ').Rinominata) }
+    Check "area che non c'e': NON rinomina"            { (-not (Rename-STWorkspace -Name 'fantasma' -NewName 'x').Rinominata) }
+    Check "stesso nome: NON rinomina"                  { (-not (Rename-STWorkspace -Name 'rnmA' -NewName 'rnmA').Rinominata) }
+    Check "dopo i no la cartella e' sempre quella"     { ((Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'rnmA') 'workspace.json') -Raw | ConvertFrom-Json).Name -eq 'rnmA') }
+    # Solo maiuscole: e' una rinomina vera e Windows la sa fare (sonda 22/09).
+    New-STWorkspace -Name 'rncase' -Tabs @(@{ Title='c'; Cwd='C:\rc'; Command='& c' }) | Out-Null
+    $rc = Rename-STWorkspace -Name 'rncase' -NewName 'RnCase'
+    Check "solo maiuscole: rinomina"                   { ($rc.Rinominata) }
+    Check "solo maiuscole: il file porta il nome nuovo" { ((Get-Content -LiteralPath (Join-Path (Join-Path $wsDir 'RnCase') 'workspace.json') -Raw | ConvertFrom-Json).Name -ceq 'RnCase') }
+    # Il rollback: cartella rinominata ma file non aggiornabile -> la cartella torna
+    # indietro, niente stati a meta'. Il file in sola lettura e' il modo onesto di
+    # vedere questo ramo davvero.
+    New-STWorkspace -Name 'rnrb' -Tabs @(@{ Title='r'; Cwd='C:\rr'; Command='& r' }) | Out-Null
+    $rbWj = Join-Path (Join-Path $wsDir 'rnrb') 'workspace.json'
+    Set-ItemProperty -LiteralPath $rbWj -Name IsReadOnly -Value $true
+    $rb = Rename-STWorkspace -Name 'rnrb' -NewName 'rnrb-new'
+    Set-ItemProperty -LiteralPath $rbWj -Name IsReadOnly -Value $false
+    Check "file non aggiornabile: NON rinomina"        { (-not $rb.Rinominata) }
+    Check "e la cartella e' tornata indietro"          { ((Test-Path -LiteralPath (Join-Path $wsDir 'rnrb')) -and -not (Test-Path -LiteralPath (Join-Path $wsDir 'rnrb-new'))) }
+
     Section "Get-STNameFromLaunch - F2: il venv senza punto (context-server)"
     # La funzione non e' esportata: si chiama nello scope del modulo, come fece il
     # manovale. La regola vale in tutte e due le direzioni: il caso vero deve parlare,
