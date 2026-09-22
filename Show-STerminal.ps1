@@ -215,6 +215,7 @@ function Invoke-STEditTabsDialog {
   <Grid Margin="12">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
@@ -223,13 +224,17 @@ function Invoke-STEditTabsDialog {
     <StackPanel Grid.Row="0" Margin="0,0,0,8">
       <TextBlock x:Name="Hdr" FontWeight="Bold" TextWrapping="Wrap"/>
       <TextBlock x:Name="Warn" Foreground="#8A6D00" TextWrapping="Wrap" Margin="0,4,0,0"
-                 Text="Rinominare cambia la riga salvata, non il tab vivo: sullo schermo non succede niente finche&#39; non fai Riprendi."/>
+                 Text="Rinominare cambia cio&#39; che e&#39; salvato, non il tab vivo: sullo schermo non succede niente finche&#39; non fai Riprendi."/>
     </StackPanel>
-    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+      <TextBlock Text="Nome dell'area:" Width="110" VerticalAlignment="Center"/>
+      <TextBox x:Name="AreaBox" Width="300"/>
+    </StackPanel>
+    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
       <StackPanel x:Name="RowsPanel"/>
     </ScrollViewer>
-    <TextBlock x:Name="Results" Grid.Row="2" Foreground="Gray" TextWrapping="Wrap" Margin="0,8,0,0"/>
-    <WrapPanel Grid.Row="4" HorizontalAlignment="Right" Margin="0,10,0,0">
+    <TextBlock x:Name="Results" Grid.Row="3" Foreground="Gray" TextWrapping="Wrap" Margin="0,8,0,0"/>
+    <WrapPanel Grid.Row="5" HorizontalAlignment="Right" Margin="0,10,0,0">
       <Button x:Name="Applica" Content="Applica" Width="90" Height="30" Margin="0,0,8,0"/>
       <Button x:Name="Chiudi" Content="Chiudi" Width="90" Height="30" IsCancel="True"/>
     </WrapPanel>
@@ -238,11 +243,16 @@ function Invoke-STEditTabsDialog {
 "@
     $dlg      = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dx))
     $hdr      = $dlg.FindName('Hdr')
+    $areaBox  = $dlg.FindName('AreaBox')
     $panel    = $dlg.FindName('RowsPanel')
     $results  = $dlg.FindName('Results')
     $btnApplica = $dlg.FindName('Applica')
     $btnChiudi  = $dlg.FindName('Chiudi')
     $hdr.Text = "Righe salvate dell'area '$Name'  (i titoli si cambiano qui)"
+    $areaBox.Text = $Name
+    # Il nome con cui si chiamano i gesti: parte da $Name e si aggiorna a ogni rinomina
+    # riuscita, cosi' il prossimo Applica non chiama il fantasma del nome vecchio.
+    $stato = @{ NomeCorrente = $Name }
 
     # LETTURA: i valori che indirizzeranno la scrittura si catturano ORA, non al click.
     $righeUi = @()
@@ -275,6 +285,26 @@ function Invoke-STEditTabsDialog {
 
     $esito = @{ Valore = $null }
     $btnApplica.Add_Click(({
+        # DUE gesti, non una cosa sola: la sequenza non ha rollback. L'ordine e' area
+        # PRIMA, titoli POI col nome corrente: se la rinomina riesce, i titoli vanno
+        # chiamati col nome NUOVO (col vecchio il motore direbbe "nessuna riga" e la
+        # persona crederebbe a una colpa sua); se fallisce, i titoli restano possibili
+        # col nome vecchio -- un no dell'area non deve portarsi dietro i titoli.
+        $linee = @()
+        $areaRinominata = $false; $areaRifiutata = $false; $areaMotivo = $null
+        $nuovoNome = $areaBox.Text.Trim()
+        if ($nuovoNome -cne $stato.NomeCorrente) {
+            $ra = Rename-STWorkspace -Name $stato.NomeCorrente -NewName $nuovoNome
+            if ($ra.Rinominata) {
+                $areaRinominata = $true
+                $linee += "Area: '$($stato.NomeCorrente)' -> '$nuovoNome'."
+                $stato.NomeCorrente = $nuovoNome
+                $hdr.Text = "Righe salvate dell'area '$nuovoNome'  (i titoli si cambiano qui)"
+            } else {
+                $areaRifiutata = $true; $areaMotivo = $ra.Motivo
+                $linee += "Area NON rinominata: $($ra.Motivo)."
+            }
+        }
         $cambi = @()
         foreach ($r in $righeUi) {
             $nuovo = $r.Box.Text.Trim()
@@ -282,8 +312,10 @@ function Invoke-STEditTabsDialog {
                 $cambi += @{ TitleVecchio=$r.Title; NuovoTitolo=$nuovo; Cwd=$r.Cwd; Shell=$r.Shell; Command=$r.Command }
             }
         }
-        $esiti = @(Invoke-STTabRenameApply -Name $Name -Cambi $cambi)
-        $results.Text = [string]::Join([Environment]::NewLine, @($esiti | ForEach-Object Riga))
+        $esiti = if ($cambi.Count) { @(Invoke-STTabRenameApply -Name $stato.NomeCorrente -Cambi $cambi) } else { @() }
+        $linee += @($esiti | ForEach-Object Riga)
+        if (-not $linee) { $linee = @("Nessuna modifica: il nome e i titoli sono quelli salvati.") }
+        $results.Text = [string]::Join([Environment]::NewLine, $linee)
         # Dopo un SI' la riga salvata ha il titolo nuovo: il prossimo Applica deve
         # indirizzare QUELLO, non il fantasma del vecchio. Dopo un NO resta il vecchio.
         $okN = 0; $noN = 0
@@ -293,13 +325,15 @@ function Invoke-STEditTabsDialog {
                 foreach ($r in $righeUi) { if ($r.Title -eq $e.Prima -and $r.Box.Text.Trim() -eq $e.Dopo) { $r.Title = $e.Dopo } }
             } elseif ($e.Esito -eq 'rifiutata') { $noN++ }
         }
-        $esito.Valore = @{ Rinominate=$okN; Rifiutate=$noN }
+        $esito.Valore = @{ Rinominate=$okN; Rifiutate=$noN
+                           AreaRinominata=$areaRinominata; AreaNome=$stato.NomeCorrente
+                           AreaRifiutata=$areaRifiutata; AreaMotivo=$areaMotivo }
     }).GetNewClosure())
     $btnChiudi.Add_Click({ $dlg.DialogResult = $false; $dlg.Close() }.GetNewClosure())
 
     if ($NoShow) {
         return [pscustomobject]@{
-            Costruito = $true; Righe = $righeUi; Results = $results
+            Costruito = $true; Righe = $righeUi; Results = $results; AreaBox = $areaBox
             Applica = $btnApplica; Chiudi = $btnChiudi; Esito = $esito; Warn = $dlg.FindName('Warn')
         }
     }
@@ -469,11 +503,22 @@ $btnEdit.Add_Click({
     $n = $wsList.SelectedItem.Tag
     $esito = Invoke-STEditTabsDialog -Name $n
     # Si dice cosa e' successo, non cosa era stato chiesto. Il dettaglio per riga e'
-    # rimasto nel dialogo; qui il riassunto, compresi i NO del motore.
+    # rimasto nel dialogo; qui il riassunto, compresi i NO del motore, dei DUE gesti:
+    # un "fatto" che nasconde meta' e' il difetto che togliamo da due giorni.
     if ($esito) {
-        $t = "Modifica '$n': $($esito.Rinominate) rinominate"
-        if ($esito.Rifiutate) { $t += ", $($esito.Rifiutate) NON fatte (il perche' era nel dialogo)" }
-        $t += ". Il tab vivo non cambia finche' non fai Riprendi."
+        $parti = @()
+        if ($esito.AreaRinominata) {
+            $parti += "area rinominata in '$($esito.AreaNome)'"
+            # La lista a sinistra mostra ancora il nome vecchio, e il suo Tag non
+            # esiste piu': va rifatta, o Riprendi/Elimina cercherebbero un fantasma.
+            Update-WsList
+        }
+        if ($esito.AreaRifiutata) { $parti += "area NON rinominata" }
+        $parti += "$($esito.Rinominate) titoli rinominati"
+        if ($esito.Rifiutate) { $parti += "$($esito.Rifiutate) NON fatti" }
+        $t = "Modifica '$n': " + ($parti -join ', ') + "."
+        if ($esito.AreaRifiutata -or $esito.Rifiutate) { $t += " Il perche' era nel dialogo." }
+        $t += " Il tab vivo non cambia finche' non fai Riprendi."
         $status.Text = $t
     }
 })
@@ -610,6 +655,50 @@ if ($TestAddDialog) {
     '{"Tabs": []}' | Set-Content -LiteralPath (Join-Path $dirV 'workspace.json') -Encoding utf8
     $e4 = Invoke-STEditTabsDialog -Name 'edvuota' -NoShow
     T "area vuota: lo dice"                    ($e4.Results.Text -match 'non ha righe')
+
+    # --- Modifica: anche il NOME DELL'AREA, nello stesso posto ("in modifica puoi
+    # gestire i nomi" -- il disegno). Due gesti, un Applica: area PRIMA, titoli POI
+    # col nome corrente. La sequenza non ha rollback: ogni esito si mostra intero.
+    New-STWorkspace -Name 'edarea' -Tabs @(@{ Title='r1'; Cwd='C:\ea'; Shell='powershell.exe'; Command='& ea' }) | Out-Null
+    $f1 = Invoke-STEditTabsDialog -Name 'edarea' -NoShow
+    T "la casella del nome area c'e'"            ($f1.AreaBox.Text -eq 'edarea')
+    $f1.AreaBox.Text = 'edarea-new'
+    $f1.Applica.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) 2>$null
+    $wa = Get-Content -LiteralPath (Join-Path (Join-Path $tmpWs2 'edarea-new') 'workspace.json') -Raw | ConvertFrom-Json
+    T "dalla finestra si rinomina l'area"        ((Test-Path -LiteralPath (Join-Path $tmpWs2 'edarea-new')) -and -not (Test-Path -LiteralPath (Join-Path $tmpWs2 'edarea')))
+    T "il file porta il nome nuovo"              ($wa.Name -eq 'edarea-new')
+    T "la riga e' venuta dietro intatta"         ($wa.Tabs[0].Title -eq 'r1' -and $wa.Tabs[0].Command -eq '& ea')
+    T "l'esito conta anche l'area"               ($f1.Esito.Valore.AreaRinominata -and $f1.Esito.Valore.AreaNome -eq 'edarea-new')
+    T "e lo mostra nel dialogo"                  ($f1.Results.Text -match "Area: 'edarea' -> 'edarea-new'")
+    # Dopo la rinomina, il prossimo Applica deve lavorare col nome NUOVO
+    $f1.Righe[0].Box.Text = 'r1bis'
+    $f1.Applica.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) 2>$null
+    $wa = Get-Content -LiteralPath (Join-Path (Join-Path $tmpWs2 'edarea-new') 'workspace.json') -Raw | ConvertFrom-Json
+    T "dopo la rinomina i titoli vanno col nome nuovo" ($wa.Tabs[0].Title -eq 'r1bis')
+
+    # Area + titoli nello STESSO Applica: tutti e due, e il file giusto
+    New-STWorkspace -Name 'edboth' -Tabs @(@{ Title='t1'; Cwd='C:\eb'; Shell='powershell.exe'; Command='& eb' }) | Out-Null
+    $f2 = Invoke-STEditTabsDialog -Name 'edboth' -NoShow
+    $f2.AreaBox.Text = 'edboth-new'
+    $f2.Righe[0].Box.Text = 't1new'
+    $f2.Applica.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) 2>$null
+    $wb = Get-Content -LiteralPath (Join-Path (Join-Path $tmpWs2 'edboth-new') 'workspace.json') -Raw | ConvertFrom-Json
+    T "stesso Applica: area rinominata"          ($wb.Name -eq 'edboth-new')
+    T "stesso Applica: titolo nel file giusto"   ($wb.Tabs[0].Title -eq 't1new' -and $wb.Tabs[0].Fonte -eq 'persona')
+    T "il vecchio nome non esiste piu'"          (-not (Test-Path -LiteralPath (Join-Path $tmpWs2 'edboth')))
+
+    # La guardia si VEDE: il punto ferma l'area, e i titoli vanno col nome vecchio --
+    # mezzo fatto, detto intero
+    New-STWorkspace -Name 'edguard' -Tabs @(@{ Title='vecchio'; Cwd='C:\eg'; Shell='powershell.exe'; Command='& eg' }) | Out-Null
+    $f3 = Invoke-STEditTabsDialog -Name 'edguard' -NoShow
+    $f3.AreaBox.Text = 'ed.guard'
+    $f3.Righe[0].Box.Text = 'nuovo'
+    $f3.Applica.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) 2>$null
+    $wg = Get-Content -LiteralPath (Join-Path (Join-Path $tmpWs2 'edguard') 'workspace.json') -Raw | ConvertFrom-Json
+    T "nome col punto: la guardia si vede"       ($f3.Results.Text -match 'Area NON rinominata' -and $f3.Results.Text -match 'sembrare un file')
+    T "la cartella non si e' mossa"              ($wg.Name -eq 'edguard')
+    T "il titolo e' andato col nome vecchio"     ($wg.Tabs[0].Title -eq 'nuovo')
+    T "mezzo fatto, detto intero"                ($f3.Esito.Valore.AreaRifiutata -and $f3.Esito.Valore.Rinominate -eq 1)
 
     "`n=== TestAddDialog: $(if ($ok) { 'TUTTO VERDE' } else { 'CI SONO FAIL' }) ==="
     if (-not $ok) { exit 1 }
